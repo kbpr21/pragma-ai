@@ -24,11 +24,13 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-      - name: Ruff
-        run: ruff check pragma tests
+          python -m pip install -e ".[dev]"
+      - name: Ruff lint
+        run: python -m ruff check pragma tests
+      - name: Ruff format check
+        run: python -m ruff format --check pragma tests
       - name: Mypy
-        run: mypy pragma
+        run: python -m mypy pragma
         continue-on-error: true
 
   test:
@@ -52,16 +54,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,pdf,docx,html]"
+          python -m pip install -e ".[dev,pdf,docx,html]"
+
+      - name: Show installed packages
+        run: python -m pip list
 
       - name: Run unit tests
-        run: pytest tests/unit -q
+        run: python -m pytest tests/unit -q --tb=short
 
       - name: Run integration tests
-        run: pytest tests/integration -q
+        run: python -m pytest tests/integration -q --tb=short
 
       - name: Run benchmark tests (smoke)
-        run: pytest tests/benchmarks -q
+        run: python -m pytest tests/benchmarks -q --tb=short
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
 
   build-check:
