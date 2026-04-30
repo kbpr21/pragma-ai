@@ -7,9 +7,8 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
-[![CI](https://github.com/kbpr21/pragma-ai/actions/workflows/test.yml/badge.svg)](https://github.com/kbpr21/pragma-ai/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-289%20passing-brightgreen)](https://github.com/kbpr21/pragma-ai/actions)
+[![Tests](https://img.shields.io/badge/tests-289%20passing-brightgreen)](#status)
 
 [Quickstart](#quickstart) ·
 [Why](#why-pragma) ·
@@ -184,9 +183,17 @@ print(report.summary())
 
 ## Status
 
-* **289 tests** passing across 3 OS × 4 Python versions
-* `ruff` clean, type-annotated (`py.typed`)
+* **289 tests** passing locally (Windows / Python 3.12)
+* `ruff` clean, type-annotated (`py.typed` shipped)
 * Stable public API at v1.0 — see [CHANGELOG.md](CHANGELOG.md)
+
+Run the suite yourself:
+
+```bash
+pip install -e ".[dev]"
+pytest tests -q
+ruff check pragma tests
+```
 
 ## Contributing
 

@@ -44,9 +44,9 @@ launch payload.
 * `py.typed` marker for downstream type-checking.
 * `tests/unit/test_enhancements.py` regression suite (11 tests pinning the
   bugs fixed below).
-* GitHub Actions matrix CI: 3 OS × 4 Python versions, ruff, mypy, pytest,
-  build sanity, twine metadata check.
-* GitHub Actions publish workflow using PyPI **Trusted Publisher (OIDC)**.
+* Releases hand-verified locally: `pytest tests -q` (289 pass on
+  Windows / Python 3.12), `ruff` clean, `python -m build` + `twine check`
+  green. Automated CI is on the roadmap.
 
 ### Fixed (over the pre-release codebase)
 

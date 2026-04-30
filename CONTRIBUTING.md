@@ -196,13 +196,16 @@ pytest tests/benchmarks -q                 # token/latency/accuracy
 pytest tests -q --cov=pragma --cov-report=term-missing
 ```
 
-CI runs the full matrix (Linux/macOS/Windows × Python 3.9–3.12) on every PR.
-A PR is mergeable when:
+A PR is mergeable when, locally:
 
-* all unit + integration tests pass on all matrix legs;
-* `ruff check pragma tests` is clean;
-* mypy doesn't introduce new errors (existing baseline is allowed);
-* `python -m build && twine check dist/*` succeeds.
+* `pytest tests -q` passes;
+* `ruff check pragma tests` and `ruff format --check pragma tests` are clean;
+* `python -m build && twine check dist/*` succeeds;
+* mypy doesn't introduce new errors (existing baseline is allowed).
+
+> Automated CI is intentionally not configured at this stage — the project
+> ships hand-verified releases. Adding a green-on-PR workflow is on the
+> roadmap; contributions welcome.
 
 ## Reporting bugs
 
