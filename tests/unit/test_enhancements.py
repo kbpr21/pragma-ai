@@ -318,6 +318,23 @@ def test_decomposer_skips_llm_for_simple_queries() -> None:
 # the v1.0.2 work-in-progress branch and have been consolidated.
 
 
+def test_ingest_long_text_string_does_not_crash(tmp_path: Path) -> None:
+    """Regression: ``kb.ingest(text)`` with a string longer than the
+    POSIX NAME_MAX (255 chars) used to crash on Linux because
+    ``Path(source).is_dir()`` raised OSError. Pin: it must be treated
+    as raw text and reach the ingestion pipeline.
+
+    Reproduces the CI failure in
+    ``tests/benchmarks/test_ingestion.py::test_pdf_pages_per_minute``.
+    """
+    kb = KnowledgeBase(llm=_MockLLM(), kb_dir=str(tmp_path))
+    long_text = "Apple Inc. was founded in 1976. " * 30  # ~960 chars
+    # Should not raise OSError("File name too long").
+    result = kb.ingest(long_text)
+    assert result is not None
+    kb.close()
+
+
 def test_query_populates_source_facts(tmp_path: Path) -> None:
     """Mocking the full query pipeline to confirm source_facts is populated."""
     import networkx as nx

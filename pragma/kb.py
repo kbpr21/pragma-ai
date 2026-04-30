@@ -93,7 +93,17 @@ class KnowledgeBase:
             sources = source if isinstance(source, list) else [source]
         else:
             source = Path(source) if not isinstance(source, str) else source
-            if Path(source).is_dir():
+            # ``Path(source).is_dir()`` calls os.stat under the hood, which
+            # raises OSError on POSIX when the string is longer than the
+            # platform's NAME_MAX (typically 255 chars). When ``source`` is
+            # raw document text -- not a path -- we must not let that
+            # exception escape; treat it as "not a directory" and pass the
+            # text straight through to the ingestion pipeline.
+            try:
+                is_dir = Path(source).is_dir()
+            except (OSError, ValueError):
+                is_dir = False
+            if is_dir:
                 sources = self._discover_files(source)
             else:
                 sources = [source]
