@@ -350,9 +350,34 @@ class KnowledgeBase:
             self._storage.save_query_cache(cache_key, query, result)
             return result
 
-        graph_paths = traverser.get_reasoning_paths(subgraph, seed_entities)
+        # Graph reasoning paths used to be sent to the LLM here, but the
+        # facts already encode the same structural information and the path
+        # text was pure prompt bloat. They are reconstructed downstream from
+        # the cited facts when needed.
 
-        synthesis = synthesizer.synthesize(query, facts, graph_paths)
+        # Resolve subject/object UUIDs to entity NAMES so the LLM sees readable
+        # references instead of opaque IDs. Without this the model both
+        # produces worse answers AND the prompt is bloated with UUID strings.
+        ids_to_resolve: set = set()
+        for f in facts:
+            if f.get("subject_id"):
+                ids_to_resolve.add(str(f["subject_id"]))
+            if f.get("object_id"):
+                ids_to_resolve.add(str(f["object_id"]))
+        entity_names: Dict[str, str] = {}
+        if ids_to_resolve:
+            try:
+                conn = self._storage._get_connection()
+                placeholders = ",".join("?" * len(ids_to_resolve))
+                rows = conn.execute(
+                    f"SELECT id, name FROM entities WHERE id IN ({placeholders})",
+                    tuple(ids_to_resolve),
+                ).fetchall()
+                entity_names = {row["id"]: row["name"] for row in rows}
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Could not resolve entity names: {e}")
+
+        synthesis = synthesizer.synthesize(query, facts, entity_names=entity_names)
 
         reasoning_steps = [
             ReasoningStep(
@@ -384,9 +409,25 @@ class KnowledgeBase:
             except Exception:  # noqa: BLE001
                 continue
 
-        approx_tokens = len(query.split()) + sum(
-            len(str(f.get("context", "")).split()) + 8 for f in facts
+        # Estimate prompt tokens actually sent to the synthesis LLM. We
+        # mirror the synthesizer's pre-filter + compact rendering so the
+        # number reflects the real prompt, not pragma's internal fact set.
+        # ~4 chars per token is the standard rough conversion for LLMs.
+        from pragma.query.synthesizer import (
+            DEFAULT_SYNTHESIS_PROMPT,
+            AnswerSynthesizer,
         )
+
+        prompt_facts = synthesizer._filter_facts_by_query(facts, query, entity_names)[
+            : synthesizer.max_facts
+        ]
+        fact_chars = sum(
+            len(synthesizer._format_fact(f, i + 1, entity_names)) + 1
+            for i, f in enumerate(prompt_facts)
+        )
+        approx_chars = len(DEFAULT_SYNTHESIS_PROMPT) + len(query) + fact_chars + 8
+        approx_tokens = max(1, approx_chars // 4)
+        del AnswerSynthesizer  # keep import-time symbols out of locals
 
         result = PragmaResult(
             answer=synthesis.answer,
@@ -463,37 +504,49 @@ class KnowledgeBase:
             yield "Insufficient knowledge in KB for this query"
             return
 
-        graph_paths = traverser.get_reasoning_paths(subgraph, seed_entities)
+        # Resolve entity UUIDs to names so the streamed prompt uses readable
+        # references (mirrors the non-streaming path).
+        from pragma.query.synthesizer import (
+            AnswerSynthesizer,
+            DEFAULT_SYNTHESIS_PROMPT,
+        )
 
-        facts_strings = [self._format_fact(f) for f in facts]
-        facts_text = "\n".join(facts_strings)
-        path_text = "\n".join(graph_paths) if graph_paths else "No direct path found"
+        ids: set = set()
+        for f in facts:
+            if f.get("subject_id"):
+                ids.add(str(f["subject_id"]))
+            if f.get("object_id"):
+                ids.add(str(f["object_id"]))
+        entity_names: Dict[str, str] = {}
+        if ids:
+            try:
+                conn = self._storage._get_connection()
+                placeholders = ",".join("?" * len(ids))
+                rows = conn.execute(
+                    f"SELECT id, name FROM entities WHERE id IN ({placeholders})",
+                    tuple(ids),
+                ).fetchall()
+                entity_names = {row["id"]: row["name"] for row in rows}
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"stream: could not resolve entity names: {e}")
 
-        user_prompt = f"""Question: {query}
-
-Atomic Facts:
-{facts_text}
-
-Reasoning Path:
-{path_text}
-
-Provide your answer in the specified JSON format."""
-
-        default_prompt = "You are a precise knowledge synthesis assistant."
+        synth = AnswerSynthesizer(self._llm)
+        filtered = synth._filter_facts_by_query(facts, query, entity_names)
+        capped = filtered[: synth.max_facts]
+        facts_text = "\n".join(
+            synth._format_fact(f, i + 1, entity_names) for i, f in enumerate(capped)
+        )
+        user_prompt = f"{query}\n{facts_text}"
 
         async for token in self._llm.stream_complete(
             [
-                {"role": "system", "content": default_prompt},
+                {"role": "system", "content": DEFAULT_SYNTHESIS_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.0,
-            max_tokens=1000,
+            max_tokens=200,
         ):
             yield token
-
-    def _format_fact(self, fact: Dict[str, Any]) -> str:
-        """Format fact dict as string for prompt."""
-        return f"[{fact.get('id', '?')}] {fact.get('subject_id', '?')} | {fact.get('predicate', '?')} | {fact.get('object_value', fact.get('object_id', '?'))}"
 
     def close(self) -> None:
         """Close the knowledge base."""

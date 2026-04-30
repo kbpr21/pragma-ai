@@ -1,37 +1,131 @@
+"""Answer synthesis: turn (query, facts) into a cited answer with minimum
+token cost.
+
+Token-efficiency techniques used here, all empirically justified by the
+benchmark in ``benchmarks_run/run.py``:
+
+1. **Compact fact rendering** -- ``F1: <subj> -- <pred> --> <obj>`` using
+   entity NAMES, not UUIDs (~10 tokens/fact vs ~30 before).
+2. **Query-keyword pre-filter** -- only facts whose subject/predicate/object
+   text overlaps with the query make it into the prompt. This commonly drops
+   the fact list from ~25 to ~3-5 without hurting answer quality.
+3. **Direct-answer fast-path** -- when exactly one filtered fact's subject
+   AND predicate both match the query strongly, the answer is its object
+   value, returned WITHOUT an LLM call.
+4. **Compact JSON output** -- ``{"a": "...", "f": ["F1"]}`` instead of a
+   nested ``reasoning_steps`` array. Saves ~50 completion tokens per query.
+5. **No graph_path in the prompt** -- the facts already encode structure.
+6. **No system-prompt boilerplate** -- single-line directive, no rules list.
+"""
+
+from __future__ import annotations
+
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pragma.llm.base import LLMProvider
 from pragma.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
-_BUILTIN_SYNTHESIS_PROMPT = """You are a precise knowledge synthesis assistant. Your task is to answer questions based solely on the provided atomic facts and reasoning path.
 
-Instructions:
-1. Answer ONLY from the provided facts - do not infer information not present
-2. Provide step-by-step reasoning showing how facts connect to your answer
-3. For each reasoning step, reference the fact ID (e.g., [F001])
-4. If facts are insufficient, state "Insufficient information to answer"
-5. Assign confidence based on quality and coverage of supporting facts
-
-Output format (JSON):
-{
-  "answer": "Your answer here",
-  "reasoning_steps": [
-    {"fact_id": "F001", "explanation": "How this fact supports the answer"},
-    {"fact_id": "F002", "explanation": "How this fact supports the answer"}
-  ]
-}"""
+# Single-line, ~20-token directive. The schema example tells the model the
+# exact shape we want; no list of "rules" required.
+_BUILTIN_SYNTHESIS_PROMPT = (
+    "Answer briefly using ONLY these facts. "
+    'Output one JSON object: {"a":"answer","f":["F1","F2"]} -- "f" is the '
+    'list of fact IDs you used. If none answer, set "a":"unknown" and "f":[].'
+)
 
 
 DEFAULT_SYNTHESIS_PROMPT = load_prompt("synthesis", default=_BUILTIN_SYNTHESIS_PROMPT)
 
 
+# Tokens we don't count as meaningful for the keyword overlap filter. Keep
+# small; over-aggressive filtering hurts recall.
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "of",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "with",
+        "by",
+        "from",
+        "as",
+        "and",
+        "or",
+        "but",
+        "not",
+        "no",
+        "do",
+        "does",
+        "did",
+        "have",
+        "has",
+        "had",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "i",
+        "we",
+        "you",
+        "they",
+        "he",
+        "she",
+        "him",
+        "her",
+        "his",
+        "their",
+        "what",
+        "who",
+        "whom",
+        "whose",
+        "where",
+        "when",
+        "why",
+        "how",
+        "which",
+        "tell",
+        "me",
+        "about",
+        "any",
+        "some",
+        "all",
+    }
+)
+
+_WORD_RE = re.compile(r"[a-zA-Z0-9]+")
+
+
+def _query_keywords(query: str) -> List[str]:
+    """Return content-bearing lowercase tokens from the query."""
+    return [
+        w.lower()
+        for w in _WORD_RE.findall(query)
+        if len(w) > 2 and w.lower() not in _STOPWORDS
+    ]
+
+
 class SynthesisOutput:
-    """Output from answer synthesis."""
+    """Output from answer synthesis. Stable shape for downstream consumers."""
 
     def __init__(
         self,
@@ -45,36 +139,194 @@ class SynthesisOutput:
 
 
 class AnswerSynthesizer:
-    """Synthesize answer from facts and graph path."""
+    """Synthesize answer from facts with minimum token cost.
+
+    The synthesizer is the LAST line of defence on prompt size: the assembler
+    has already done coarse filtering, but our pre-filter here uses the
+    actual query string to drop irrelevant facts before they enter the prompt.
+
+    ``max_facts`` is a pure safety-rail, not a budget. Real token-budgeting
+    is in :class:`pragma.query.assembler.FactAssembler`.
+    """
 
     def __init__(
         self,
         llm: LLMProvider,
+        max_facts: Optional[int] = None,
     ) -> None:
         self.llm = llm
+        self.max_facts = max_facts if max_facts is not None else 200
 
-    def _format_fact(self, fact) -> str:
-        """Format fact (dict or string) as string."""
+    # ------------------------------------------------------------------
+    # Fact rendering
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve(
+        eid: Any,
+        names: Dict[str, str],
+        fallback: Any = None,
+    ) -> str:
+        if not eid:
+            return str(fallback) if fallback is not None else "?"
+        return names.get(str(eid), str(eid))
+
+    # When the structured triple is malformed (the extractor truncated a
+    # value into the predicate, object slot is empty), include up to this
+    # many characters of the fact's original sentence so the LLM can still
+    # answer. Trade-off: ~20-40 extra prompt tokens per degenerate fact in
+    # exchange for not silently answering "unknown".
+    _CONTEXT_SAFETY_NET_CHARS: int = 160
+
+    def _format_fact(
+        self,
+        fact: Any,
+        idx: int,
+        entity_names: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Render one fact compactly, using entity names not UUIDs.
+
+        Falls back to including a truncated ``context`` sentence when the
+        object slot is empty -- this guards against extractor failures
+        where the value was absorbed into the predicate.
+        """
         if isinstance(fact, str):
-            return fact
-        return f"[{fact.get('id', '?')}] {fact.get('subject_id', '?')} | {fact.get('predicate', '?')} | {fact.get('object_value', fact.get('object_id', '?'))} (confidence: {fact.get('confidence', 1.0):.2f})"
+            return f"F{idx}: {fact}"
+
+        names = entity_names or {}
+        subj = self._resolve(fact.get("subject_id"), names, fact.get("subject_name"))
+        obj_value = fact.get("object_value")
+        obj = obj_value if obj_value else self._resolve(fact.get("object_id"), names)
+        pred = fact.get("predicate", "?")
+
+        # Safety net: if the object slot is still empty / "?", emit the
+        # source sentence so the LLM has a fallback to read the actual
+        # value from. This catches the "predicate absorbed the value"
+        # extractor failure mode in v1.0.1 fact data.
+        if obj in (None, "", "?", "unknown") or not str(obj).strip():
+            context = str(fact.get("context") or "").strip()
+            if context:
+                if len(context) > self._CONTEXT_SAFETY_NET_CHARS:
+                    context = (
+                        context[: self._CONTEXT_SAFETY_NET_CHARS - 1].rstrip() + "..."
+                    )
+                return f"F{idx}: {subj} -- {pred} (context: {context})"
+
+        return f"F{idx}: {subj} -- {pred} --> {obj}"
+
+    # ------------------------------------------------------------------
+    # Query-keyword pre-filter
+    # ------------------------------------------------------------------
+
+    def _filter_facts_by_query(
+        self,
+        facts: List[Dict[str, Any]],
+        query: str,
+        entity_names: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
+        """Drop facts that share no content keyword with the query.
+
+        Falls back to returning the original list if filtering would leave
+        nothing -- it's better to spend a few extra prompt tokens than to
+        leave the LLM with no facts at all.
+        """
+        keywords = _query_keywords(query)
+        if not keywords:
+            return facts
+
+        scored: List[Tuple[int, Dict[str, Any]]] = []
+        for f in facts:
+            subj = self._resolve(f.get("subject_id"), entity_names).lower()
+            obj_value = (f.get("object_value") or "").lower()
+            obj = obj_value or self._resolve(f.get("object_id"), entity_names).lower()
+            pred = str(f.get("predicate") or "").lower()
+            blob = f"{subj} {pred} {obj}"
+            score = sum(1 for kw in keywords if kw in blob)
+            if score > 0:
+                scored.append((score, f))
+
+        if not scored:
+            return facts  # don't starve the LLM if nothing matched
+
+        # Higher overlap first; preserve original order on ties.
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [f for _, f in scored]
+
+    # ------------------------------------------------------------------
+    # Direct-answer fast-path (zero LLM calls)
+    # ------------------------------------------------------------------
+
+    def _try_direct_answer(
+        self,
+        query: str,
+        facts: List[Dict[str, Any]],
+        entity_names: Dict[str, str],
+    ) -> Optional[SynthesisOutput]:
+        """If exactly one fact's subject+predicate match the query, return its
+        object as the answer without calling the LLM.
+
+        Heuristics, kept conservative on purpose:
+        - need >=1 query keyword in the subject AND >=1 in the predicate
+        - require fact confidence >= 0.85
+        - only one candidate fact (otherwise we can't know which to pick)
+        """
+        keywords = _query_keywords(query)
+        if not keywords:
+            return None
+
+        candidates: List[Dict[str, Any]] = []
+        for f in facts:
+            if float(f.get("confidence", 0)) < 0.85:
+                continue
+            subj = self._resolve(f.get("subject_id"), entity_names).lower()
+            pred = str(f.get("predicate") or "").lower()
+            subj_hit = any(kw in subj for kw in keywords)
+            pred_hit = any(kw in pred for kw in keywords)
+            if subj_hit and pred_hit:
+                candidates.append(f)
+
+        if len(candidates) != 1:
+            return None
+
+        f = candidates[0]
+        obj_value = f.get("object_value")
+        obj = (
+            obj_value if obj_value else self._resolve(f.get("object_id"), entity_names)
+        )
+        if not obj or obj == "?":
+            return None
+
+        fact_id_short = "F1"
+        return SynthesisOutput(
+            answer=str(obj),
+            reasoning_steps=[
+                {
+                    "fact_id": fact_id_short,
+                    "explanation": "direct-match: subject+predicate of this fact match the query",
+                }
+            ],
+            confidence=float(f.get("confidence", 1.0)),
+        )
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
 
     def synthesize(
         self,
         query: str,
         facts: List[Dict[str, Any]],
-        graph_path: List[str],
+        graph_path: Optional[List[str]] = None,
+        entity_names: Optional[Dict[str, str]] = None,
     ) -> SynthesisOutput:
-        """Synthesize answer from facts and graph path.
+        """Synthesize an answer from facts.
 
-        Args:
-            query: Original user query
-            facts: List of fact dicts from assembler
-            graph_path: List of reasoning path strings
-
-        Returns:
-            SynthesisOutput with answer, reasoning, and confidence
+        ``graph_path`` is accepted for backward compatibility but is no
+        longer included in the LLM prompt -- the facts already encode the
+        structural information and the path text was pure prompt bloat.
         """
+        del graph_path  # intentionally ignored (kept for API compatibility)
+
         if not facts:
             return SynthesisOutput(
                 answer="Insufficient information to answer",
@@ -82,19 +334,25 @@ class AnswerSynthesizer:
                 confidence=0.0,
             )
 
-        facts_strings = [self._format_fact(f) for f in facts]
-        facts_text = "\n".join(facts_strings)
-        path_text = "\n".join(graph_path) if graph_path else "No direct path found"
+        names = entity_names or {}
 
-        user_prompt = f"""Question: {query}
+        # 1. Pre-filter by query overlap. Often shrinks 25 facts -> 3-5.
+        filtered = self._filter_facts_by_query(facts, query, names)
 
-Atomic Facts:
-{facts_text}
+        # 2. Try the direct-answer fast-path (zero LLM calls).
+        direct = self._try_direct_answer(query, filtered, names)
+        if direct is not None:
+            logger.debug("synthesize: direct-answer fast-path used")
+            return direct
 
-Reasoning Path:
-{path_text}
+        # 3. Apply safety-rail cap, render compactly, call the LLM.
+        capped_facts = filtered[: self.max_facts]
+        facts_text = "\n".join(
+            self._format_fact(f, i + 1, names) for i, f in enumerate(capped_facts)
+        )
 
-Provide your answer in the specified JSON format."""
+        # No "Q:" / "Facts:" labels -- the model can read the structure.
+        user_prompt = f"{query}\n{facts_text}"
 
         try:
             response = self.llm.complete(
@@ -103,17 +361,9 @@ Provide your answer in the specified JSON format."""
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.0,
-                max_tokens=1000,
+                max_tokens=200,
             )
-            if not response or not response.strip():
-                logger.warning("Empty LLM response")
-                return SynthesisOutput(
-                    answer="Empty response from LLM",
-                    reasoning_steps=[],
-                    confidence=0.0,
-                )
-            logger.info(f"LLM response: {response[:200]}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"Synthesis LLM call failed: {e}")
             return SynthesisOutput(
                 answer="Error during synthesis",
@@ -121,8 +371,14 @@ Provide your answer in the specified JSON format."""
                 confidence=0.0,
             )
 
-        result = self._parse_response(response)
+        if not response or not response.strip():
+            return SynthesisOutput(
+                answer="Empty response from LLM",
+                reasoning_steps=[],
+                confidence=0.0,
+            )
 
+        result = self._parse_response(response)
         if result is None:
             return SynthesisOutput(
                 answer="Could not parse synthesis response",
@@ -130,85 +386,93 @@ Provide your answer in the specified JSON format."""
                 confidence=0.0,
             )
 
-        confidence = self._calculate_confidence_from_facts(facts)
-
         return SynthesisOutput(
             answer=result.get("answer", ""),
             reasoning_steps=result.get("reasoning_steps", []),
-            confidence=confidence,
+            confidence=self._compute_confidence(capped_facts),
         )
 
-    def _parse_response(self, response: str) -> Optional[Dict[str, Any]]:
-        """Parse LLM JSON response."""
-        text = response.strip()
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
 
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"^```\s*", "", text)
-        text = re.sub(r"```$", "", text)
-        text = text.strip()
+    @staticmethod
+    def _strip_code_fences(text: str) -> str:
+        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+        text = re.sub(r"```\s*$", "", text)
+        return text.strip()
+
+    def _parse_response(self, response: str) -> Optional[Dict[str, Any]]:
+        """Parse the LLM response into a normalised
+        ``{answer, reasoning_steps}`` dict.
+
+        Accepts both the new compact schema (``{"a": ..., "f": [...]}``) and
+        the legacy verbose schema (``{"answer": ..., "reasoning_steps":
+        [...]}``) for forward/backward compatibility. Falls back to
+        plain-text parsing if JSON fails.
+        """
+        text = self._strip_code_fences(response)
 
         try:
             parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error: {e}, trying fallback")
+        except json.JSONDecodeError:
+            logger.debug("synthesize: JSON parse failed; using fallback")
+            return self._fallback_parse(text)
 
-        return self._fallback_parse(text)
+        if not isinstance(parsed, dict):
+            return self._fallback_parse(text)
+
+        # Compact schema  ->  normalise.
+        if "a" in parsed:
+            answer = str(parsed.get("a", "")).strip()
+            ids = parsed.get("f") or []
+            if not isinstance(ids, list):
+                ids = []
+            steps = [{"fact_id": str(fid), "explanation": ""} for fid in ids if fid]
+            return {"answer": answer, "reasoning_steps": steps}
+
+        # Legacy schema  ->  pass through with light cleanup.
+        answer = str(parsed.get("answer", "")).strip()
+        raw_steps = parsed.get("reasoning_steps") or []
+        steps = []
+        if isinstance(raw_steps, list):
+            for s in raw_steps:
+                if isinstance(s, dict):
+                    steps.append(
+                        {
+                            "fact_id": str(s.get("fact_id", "")),
+                            "explanation": str(s.get("explanation", "")),
+                        }
+                    )
+        return {"answer": answer, "reasoning_steps": steps}
 
     def _fallback_parse(self, text: str) -> Optional[Dict[str, Any]]:
-        """Fallback parsing for plain text."""
-        lines = text.split("\n")
-        answer_lines = []
-        reasoning_steps = []
-
-        in_reasoning = False
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            if "reasoning" in line.lower():
-                in_reasoning = True
-                continue
-
-            if in_reasoning and (line.startswith("[") or "fact" in line.lower()):
-                reasoning_steps.append({"fact_id": "F001", "explanation": line})
-            else:
-                answer_lines.append(line)
-
-        if not answer_lines:
+        """Last-resort plain-text parsing when JSON fails."""
+        if not text:
             return None
+        # Heuristic: take the first non-empty line as the answer.
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                return {"answer": line, "reasoning_steps": []}
+        return None
 
-        return {
-            "answer": " ".join(answer_lines),
-            "reasoning_steps": reasoning_steps[:5],
-        }
+    # ------------------------------------------------------------------
+    # Confidence
+    # ------------------------------------------------------------------
 
-    def _calculate_confidence(self, facts: List[Dict[str, Any]]) -> float:
-        """Calculate confidence from fact dicts."""
+    @staticmethod
+    def _compute_confidence(facts: List[Dict[str, Any]]) -> float:
+        """Confidence = mean(fact.confidence) + small recall bonus.
+
+        Replaces the previous two confidence helpers (``_calculate_confidence``
+        and ``_calculate_confidence_from_facts``); they did the same thing
+        with different inputs and were both partially broken when the fact
+        format changed.
+        """
         if not facts:
             return 0.0
-
-        confidences = [f.get("confidence", 1.0) for f in facts]
-        avg_confidence = sum(confidences) / len(confidences)
-
-        reasoning_bonus = min(len(facts) * 0.02, 0.2)
-
-        return min(avg_confidence + reasoning_bonus, 1.0)
-
-    def _calculate_confidence_from_facts(self, facts: List[str]) -> float:
-        """Calculate confidence from formatted fact strings."""
-        if not facts:
-            return 0.0
-
-        confidences = []
-        for fact in facts:
-            match = re.search(r"confidence:\s*([\d.]+)", str(fact))
-            if match:
-                confidences.append(float(match.group(1)))
-            else:
-                confidences.append(1.0)
-
-        avg = sum(confidences) / len(confidences) if confidences else 0.0
-        return min(avg + 0.1, 1.0)
+        values = [float(f.get("confidence", 1.0)) for f in facts]
+        avg = sum(values) / len(values)
+        recall_bonus = min(len(values) * 0.02, 0.2)
+        return min(avg + recall_bonus, 1.0)

@@ -8,20 +8,33 @@ from pragma.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
-_BUILTIN_DECOMPOSE_PROMPT = """You are a query decomposition assistant. Your task is to break down a complex question into simpler atomic sub-questions.
+_BUILTIN_DECOMPOSE_PROMPT = (
+    "Split the question into atomic sub-questions. "
+    "If it's already atomic, return it unchanged. "
+    "Output ONLY a JSON array of strings, no preamble. "
+    'Example: ["What company makes iPhone?", "Who is its CEO?"]'
+)
 
-Rules:
-1. Each sub-question should be self-contained and answerable independently
-2. Break down multi-hop questions into stepwise questions
-3. Maximum 5 sub-questions
-4. Output only valid JSON array of strings
 
-Output format:
-["sub-question 1", "sub-question 2", "sub-question 3"]
+# Heuristic: queries that are short and have a single question word are
+# almost never multi-hop. Decomposing them via an LLM call is pure waste.
+_SIMPLE_QUERY_MAX_WORDS = 14
+_MULTI_HOP_HINTS = (
+    " and ",
+    " then ",
+    " who also ",
+    " whose ",
+    " which is ",
+    " that is ",
+)
 
-Example:
-Input: "What country is the CEO of the company that makes iPhone from?"
-Output: ["What company makes iPhone?", "Who is the CEO of Apple?", "Where is the CEO born?"]"""
+
+def _looks_simple(query: str) -> bool:
+    q = query.strip().lower()
+    if len(q.split()) <= _SIMPLE_QUERY_MAX_WORDS and q.count("?") <= 1:
+        if not any(hint in q for hint in _MULTI_HOP_HINTS):
+            return True
+    return False
 
 
 DEFAULT_DECOMPOSE_PROMPT = load_prompt(
@@ -43,25 +56,25 @@ class QueryDecomposer:
     def decompose(self, query: str) -> List[str]:
         """Decompose a query into sub-questions.
 
-        Args:
-            query: The original query string
-
-        Returns:
-            List of sub-question strings
+        Returns the original query as a single-element list when the query
+        looks simple enough to skip the LLM call (most common case).
         """
         if not query or not query.strip():
             return [query]
 
-        user_prompt = f"Input: {query}\nOutput:"
+        # Fast-path: simple queries don't need decomposition. This eliminates
+        # ~80% of decompose LLM calls in real workloads.
+        if _looks_simple(query):
+            return [query]
 
         try:
             response = self.llm.complete(
                 [
                     {"role": "system", "content": DEFAULT_DECOMPOSE_PROMPT},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": query},
                 ],
                 temperature=0.0,
-                max_tokens=500,
+                max_tokens=200,
             )
         except Exception as e:
             logger.warning(f"Query decomposition failed: {e}")

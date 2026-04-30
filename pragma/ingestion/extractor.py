@@ -12,20 +12,35 @@ logger = logging.getLogger(__name__)
 _BUILTIN_FACT_PROMPT = """You are an atomic fact extractor. Your job is to decompose text into the smallest possible self-contained propositions.
 
 Rules:
-1. Each fact must be independently verifiable without reading other facts
-2. Resolve all pronouns to their referents
-3. Extract numbers and dates exactly as they appear
-4. Assign confidence: 1.0 = explicitly stated, 0.8 = strongly implied, 0.6 = inferred
-5. Preserve negation: "X does NOT cause Y" is a valid fact
-6. Do NOT infer facts not in the text
+1. Each fact must be independently verifiable without reading other facts.
+2. Resolve all pronouns to their referents.
+3. Extract numbers and dates exactly as they appear.
+4. Assign confidence: 1.0 = explicitly stated, 0.8 = strongly implied, 0.6 = inferred.
+5. Preserve negation: "X does NOT cause Y" is a valid fact.
+6. Do NOT infer facts not in the text.
+
+CRITICAL field discipline -- this is what makes facts queryable:
+7. The "predicate" is a SHORT verb phrase (1-5 words), e.g. "founded",
+   "is CEO of", "reached market cap of", "was born on". It MUST NOT
+   contain values, numbers, dates, money amounts, or named entities.
+8. Concrete values (numbers, dates, money like "$1 trillion", places,
+   percentages, durations) belong in "object_value" -- NEVER in the
+   predicate. If the value is itself an entity, put its name in "object".
+9. WRONG: predicate="reached a market capitalization of $1 trillion",
+   object=null. RIGHT: predicate="reached market cap of",
+   object_value="$1 trillion in August 2018".
+10. WRONG: predicate="was founded on April 1, 1976".
+    RIGHT: predicate="was founded on", object_value="April 1, 1976".
+11. Always populate "context" with the full original sentence so
+    downstream consumers can recover phrasing if a slot was malformed.
 
 Output ONLY valid JSON, no preamble, no markdown fences:
 [
   {
     "subject": "string (canonical noun phrase)",
-    "predicate": "string (active verb phrase, present tense)",
-    "object": "string (noun phrase or null)",
-    "object_value": "string (literal value, or null if object is an entity)",
+    "predicate": "string (short verb phrase, NO values)",
+    "object": "string (entity name) OR null",
+    "object_value": "string (literal value/number/date/money) OR null",
     "context": "string (original sentence this came from)",
     "confidence": float
   }

@@ -1,0 +1,101 @@
+name: Publish to PyPI (OIDC)
+
+# Triggered when you push a tag matching `v*` (e.g. `v1.0.1.post1`,
+# `v1.1.0`, `v1.2.0rc1`). The workflow:
+#   1. Verifies the version in pyproject.toml matches the tag.
+#   2. Runs the full test suite (must be green).
+#   3. Builds wheel + sdist with `python -m build`.
+#   4. Uploads via PyPA's official trusted-publishing action using
+#      OIDC -- NO API token, NO repo secret.
+#
+# One-time PyPI side setup (do this once per project):
+#
+#   1. Sign in at https://pypi.org/manage/account/publishing/
+#   2. Click "Add a new pending publisher"
+#   3. Fill in:
+#        Project name      : pragma-ai
+#        Owner             : <your-github-org-or-username>
+#        Repository        : <your-repo-name>
+#        Workflow filename : publish.yml
+#        Environment name  : pypi
+#   4. Save. The first push of a `v*` tag from this repo's `main`
+#      branch will then publish without any token.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:        # allow manual run too
+
+jobs:
+  build-and-publish:
+    name: Build & publish to PyPI
+    runs-on: ubuntu-latest
+
+    # Use a dedicated environment so the project's PyPI trusted-publisher
+    # config can scope itself to this environment if desired.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pragma-ai
+
+    permissions:
+      # Mandatory for OIDC-based trusted publishing.
+      id-token: write
+      # Read the repo to checkout source.
+      contents: read
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build / test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+          python -m pip install -e ".[dev]" || python -m pip install -e .
+          # Fallback: if [dev] extras aren't declared, install minimum.
+          python -m pip install pytest ruff
+
+      - name: Verify pyproject version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PY_VERSION=$(python -c "import tomllib,sys; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "Tag version       : ${TAG_VERSION}"
+          echo "pyproject version : ${PY_VERSION}"
+          if [ "${TAG_VERSION}" != "${PY_VERSION}" ]; then
+            echo "::error::Tag (${TAG_VERSION}) does not match pyproject.toml version (${PY_VERSION})."
+            exit 1
+          fi
+
+      - name: Run tests
+        run: python -m pytest tests -q --maxfail=1
+
+      - name: Lint
+        run: python -m ruff check pragma tests
+
+      - name: Build sdist + wheel
+        run: |
+          rm -rf dist/
+          python -m build
+
+      - name: Inspect distributions
+        run: python -m twine check dist/*
+
+      - name: Publish to PyPI
+        # PyPA's official action: uses the OIDC token GitHub mints for this
+        # job to authenticate as the trusted publisher configured on PyPI.
+        # No `password:` line, no `secrets.PYPI_API_TOKEN` -- that's the point.
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # If you also want to test against TestPyPI first, uncomment:
+          # repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+          # Skip if version was already uploaded (re-runs on the same tag).
+          skip-existing: true

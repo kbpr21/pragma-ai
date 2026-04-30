@@ -29,14 +29,18 @@ class TestQueryDecomposerBasic:
     def test_decompose_simple_json(self):
         llm = MockLLM('["What is Apple?", "Who is Tim Cook?"]')
         decomposer = QueryDecomposer(llm)
-        result = decomposer.decompose("Tell me about Apple")
+        # Multi-hop hint ("and") forces the LLM-call path.
+        result = decomposer.decompose("Tell me about Apple and Tim Cook")
         assert len(result) == 2
         assert "Apple" in result[0]
 
     def test_decompose_max_limit(self):
         llm = MockLLM('["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7"]')
         decomposer = QueryDecomposer(MockLLM(llm.response), max_subquestions=5)
-        result = decomposer.decompose("test")
+        # Long query with hint forces decomposition.
+        result = decomposer.decompose(
+            "Compare X and Y and Z and W and V across many dimensions please now"
+        )
         assert len(result) == 5
 
     def test_decompose_fallback_single(self):
@@ -61,13 +65,15 @@ class TestQueryDecomposerJsonParsing:
     def test_parse_markdown_fences(self):
         llm = MockLLM('```json\n["Q1", "Q2"]\n```')
         decomposer = QueryDecomposer(llm)
-        result = decomposer.decompose("test")
+        # "and" hint forces the LLM-call path.
+        result = decomposer.decompose("What is X and Y in this domain?")
         assert len(result) == 2
 
     def test_parse_plain_json(self):
         llm = MockLLM('["Question one", "Question two"]')
         decomposer = QueryDecomposer(llm)
-        result = decomposer.decompose("test")
+        # "and" hint forces the LLM-call path.
+        result = decomposer.decompose("What is X and Y here?")
         assert result == ["Question one", "Question two"]
 
     def test_parse_invalid_json(self):

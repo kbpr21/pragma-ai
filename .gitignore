@@ -157,6 +157,11 @@ attention.pdf
 *.tmp
 *.bak
 
+# Benchmark run outputs (the harness ships in the repo, the outputs do not)
+benchmarks_run/kb/
+benchmarks_run/output*.txt
+benchmarks_run/results.json
+
 # Editor swap files
 *.orig
 

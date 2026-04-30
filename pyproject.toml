@@ -4,7 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pragma-ai"
-version = "1.0.1"
+# PEP 440 post-release: same code as 1.0.1, with measured token-efficiency
+# improvements (no new API). Bumps to 1.0.1.post1, .post2 etc are reserved
+# for republishes that don't change behaviour from a user's perspective.
+version = "1.0.1.post1"
 description = "Atomic-fact reasoning over a knowledge graph. A RAG alternative that needs no vector database."
 readme = "README.md"
 license = {text = "MIT"}

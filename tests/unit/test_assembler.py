@@ -103,7 +103,9 @@ class TestFactAssembler:
 
         assert len(trimmed) < 100
 
-    def test_format_fact_dict(self):
+    def test_format_fact_dict_uses_compact_format(self):
+        """v1.0.1: render mirrors AnswerSynthesizer._format_fact, no
+        confidence in output, no zero-padded F001 prefix."""
         builder = MockGraphBuilder()
         builder.entities["e1"] = Entity("e1", "Apple", "ORG", [], None)
         builder.entities["e2"] = Entity("e2", "Tim Cook", "PERSON", [], None)
@@ -113,23 +115,12 @@ class TestFactAssembler:
         assembler = FactAssembler(builder)
         formatted = assembler.format_fact_dict(fact, index=0)
 
-        assert "F001" in formatted
+        # New compact format
+        assert formatted.startswith("F1: ")
         assert "Apple" in formatted
         assert "CEO is" in formatted
-        assert "confidence: 0.95" in formatted
-
-    def test_format_facts_for_prompt(self):
-        builder = MockGraphBuilder()
-        builder.entities["e1"] = Entity("e1", "Apple", "ORG", [], None)
-
-        facts = [
-            make_fact_dict("f1", "e1", "rel1", confidence=0.9),
-            make_fact_dict("f2", "e1", "rel2", confidence=0.8),
-        ]
-
-        assembler = FactAssembler(builder)
-        prompt = assembler.format_facts_for_prompt(facts)
-
-        assert "F001" in prompt
-        assert "F002" in prompt
-        assert len(prompt.split("\n")) == 2
+        assert "Tim Cook" in formatted
+        # Confidence intentionally NOT in the prompt (saves tokens)
+        assert "confidence" not in formatted.lower()
+        # No zero-padding (was "F001" before, now "F1:")
+        assert "F001" not in formatted

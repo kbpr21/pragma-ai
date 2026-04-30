@@ -17,7 +17,7 @@ class FactAssembler:
         self,
         graph_builder: GraphBuilder,
         min_confidence: float = 0.5,
-        max_tokens: int = 1500,
+        max_tokens: int = 600,
     ) -> None:
         self.graph_builder = graph_builder
         self.min_confidence = min_confidence
@@ -227,44 +227,29 @@ class FactAssembler:
         fact: Dict[str, Any],
         index: int,
     ) -> str:
-        """Format a fact dict for LLM prompt."""
-        fid = f"F{index + 1:03d}"
+        """Render a fact compactly for prompt-size estimation.
 
+        Mirrors :meth:`pragma.query.synthesizer.AnswerSynthesizer._format_fact`
+        so the assembler's token-budget estimate matches what's actually sent
+        to the LLM. The format is intentionally simple
+        (``F<idx>: <subject> -- <predicate> --> <object>``) and excludes the
+        confidence value -- that's metadata pragma uses internally and the
+        LLM does not need to see it.
+        """
+        fid = f"F{index + 1}"
         subject = self._get_entity_name(fact.get("subject_id"))
         predicate = fact.get("predicate", "related to")
         object_id = fact.get("object_id")
         object_value = fact.get("object_value")
-
         object_val = self._get_entity_name(object_id) if object_id else object_value
-        confidence = fact.get("confidence", 1.0)
-
-        return f"[{fid}] {subject} | {predicate} | {object_val} (confidence: {confidence:.2f})"
+        return f"{fid}: {subject} -- {predicate} --> {object_val}"
 
     def _get_entity_name(self, entity_id: Optional[str]) -> str:
-        """Get entity name by ID."""
+        """Get entity name by ID; returns the id (or ``unknown``) on failure."""
         if not entity_id:
             return "unknown"
-
         try:
             entity = self.graph_builder.storage.get_entity_by_id(entity_id)
             return entity.name if entity else entity_id
-        except Exception:
+        except Exception:  # noqa: BLE001
             return entity_id
-
-    def format_facts_for_prompt(
-        self,
-        facts: List[Dict[str, Any]],
-    ) -> str:
-        """Format all facts as a single prompt string.
-
-        Args:
-            facts: List of facts to format
-
-        Returns:
-            Multi-line string of formatted facts
-        """
-        lines = []
-        for i, fact in enumerate(facts):
-            lines.append(self.format_fact_dict(fact, index=i))
-
-        return "\n".join(lines)

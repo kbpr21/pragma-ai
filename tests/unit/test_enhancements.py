@@ -280,6 +280,44 @@ def test_cli_clear_help_does_not_raise() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_decomposer_skips_llm_for_simple_queries() -> None:
+    """Short single-clause queries must NOT trigger the decompose LLM call.
+
+    Pins the v1.0.2 token-efficiency optimisation: simple queries take the
+    fast-path so we save one LLM round-trip per query.
+    """
+    from pragma.query.decomposer import QueryDecomposer
+
+    class CountingLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, *a: Any, **kw: Any) -> str:
+            self.calls += 1
+            return '["should not see this"]'
+
+        @property
+        def model_name(self) -> str:
+            return "mock"
+
+    llm = CountingLLM()
+    dec = QueryDecomposer(llm)
+    for q in [
+        "Who founded Apple?",
+        "What year was Tim Cook born?",
+        "Where is Apple Park located?",
+    ]:
+        out = dec.decompose(q)
+        assert out == [q], f"expected fast-path for {q!r}, got {out}"
+    assert llm.calls == 0, "fast-path must not call the LLM"
+
+
+# Synthesizer-specific behaviour (entity-name rendering, safety-rail,
+# direct-answer fast-path, query-keyword filter, schema parsing) is fully
+# covered by tests/unit/test_synthesizer.py. They were duplicated here in
+# the v1.0.2 work-in-progress branch and have been consolidated.
+
+
 def test_query_populates_source_facts(tmp_path: Path) -> None:
     """Mocking the full query pipeline to confirm source_facts is populated."""
     import networkx as nx
