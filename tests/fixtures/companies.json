@@ -1,0 +1,6 @@
+{
+  "companies": [
+    {"name": "Apple", "year": 1976},
+    {"name": "Google", "year": 1998}
+  ]
+}

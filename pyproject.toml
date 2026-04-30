@@ -1,0 +1,135 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pragma-ai"
+version = "1.0.1"
+description = "Atomic-fact reasoning over a knowledge graph. A RAG alternative that needs no vector database."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "pragma contributors"}
+]
+keywords = [
+    "rag",
+    "graphrag",
+    "knowledge-graph",
+    "llm",
+    "retrieval",
+    "reasoning",
+    "atomic-facts",
+    "sqlite",
+    "networkx",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "networkx>=3.0",
+    "rank-bm25>=0.2.2",
+    "rapidfuzz>=3.0",
+    "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+pdf = [
+    "pdfplumber>=0.10",
+]
+docx = [
+    "python-docx>=1.0",
+]
+html = [
+    "beautifulsoup4>=4.12",
+    "chardet>=5.0",
+]
+embeddings = [
+    "sentence-transformers>=3.0",
+    "numpy>=1.24",
+]
+server = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+viz = [
+    "pyvis>=0.3",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "respx>=0.21",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "types-pyyaml>=1.0",
+    "pre-commit>=3.7",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.24",
+]
+all = [
+    "pragma-ai[pdf,docx,html,embeddings,server,viz]",
+]
+
+[project.urls]
+Homepage = "https://github.com/kbpr21/pragma-ai"
+Repository = "https://github.com/kbpr21/pragma-ai"
+Documentation = "https://github.com/kbpr21/pragma-ai#readme"
+Issues = "https://github.com/kbpr21/pragma-ai/issues"
+Changelog = "https://github.com/kbpr21/pragma-ai/blob/main/CHANGELOG.md"
+
+[project.scripts]
+pragma = "pragma.cli.main:app"
+pragma-ai = "pragma.cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pragma"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "pragma/**",
+    "tests/**",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/.pytest_cache",
+    "**/.mypy_cache",
+    "**/.ruff_cache",
+    "**/htmlcov",
+    "**/.coverage",
+    "spec-docs/**",
+    "docs/**",
+    ".github/**",
+]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "tests/benchmarks"]

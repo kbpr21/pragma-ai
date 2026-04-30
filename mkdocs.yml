@@ -1,0 +1,60 @@
+site_name: pragma
+site_description: "Not retrieval. Reasoning over atomic facts."
+site_url: https://pragma.ai
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+    - scheme: slate
+      primary: deep purple
+      accent: purple
+  features:
+    - navigation.integrated
+    - navigation.tabs
+    - navigation.top
+    - search.suggest
+    - search.highlight
+
+repo_url: https://github.com/kbpr21/pragma-ai
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Concepts:
+    - concepts/index.md
+    - concepts/atomic-facts.md
+    - concepts/knowledge-graph.md
+    - concepts/reasoning.md
+  - API Reference: api-reference.md
+  - Comparisons:
+    - comparisons/vs-rag.md
+    - comparisons/vs-graphrag.md
+  - Providers: providers.md
+  - Formats: formats.md
+
+markdown_extensions:
+  - attr_list
+  - codehilite:
+      guess_lang: false
+  - admonition
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/pragma-ai/

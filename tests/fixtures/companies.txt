@@ -1,0 +1,6 @@
+Apple was founded in 1976.
+Google was founded in 1998.
+Microsoft was founded in 1975.
+Apple is headquartered in Cupertino.
+Google is headquartered in Mountain View.
+Microsoft is headquartered in Redmond.
