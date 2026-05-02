@@ -119,13 +119,66 @@ class TestKnowledgeBaseIngest:
             path = f.name
 
         try:
+            # First ingest with facts: the document should be skipped
+            # on re-ingest because it already has facts.
+            facts = [
+                {
+                    "subject": "Test",
+                    "predicate": "is",
+                    "object": "content",
+                    "confidence": 1.0,
+                    "_source_doc": path,
+                    "_source_page": None,
+                    "_context": "Duplicate content",
+                    "_content_hash": "abc",
+                }
+            ]
             kb = KnowledgeBase(llm=MockLLMProvider("[]"), kb_dir=str(tmp_path))
 
-            with patch.object(kb._extractor, "extract", return_value=[]):
+            with patch.object(kb._extractor, "extract", return_value=facts):
                 kb.ingest(path, show_progress=False)
                 result = kb.ingest(path, show_progress=False)
 
             assert result.skipped == 1
+            kb.close()
+        finally:
+            Path(path).unlink()
+
+    def test_ingest_retries_zero_fact_documents(self, tmp_path):
+        """A document that produced zero facts on first ingest should
+        be re-processed (not skipped) on the next attempt."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("Some content that initially produced no facts")
+            path = f.name
+
+        try:
+            kb = KnowledgeBase(llm=MockLLMProvider("[]"), kb_dir=str(tmp_path))
+
+            # First ingest: 0 facts
+            with patch.object(kb._extractor, "extract", return_value=[]):
+                result1 = kb.ingest(path, show_progress=False)
+            assert result1.facts == 0
+
+            # Second ingest: should NOT skip — should re-process
+            facts = [
+                {
+                    "subject": "Some content",
+                    "predicate": "produced",
+                    "object": "facts",
+                    "confidence": 1.0,
+                    "_source_doc": path,
+                    "_source_page": None,
+                    "_context": "Some content",
+                    "_content_hash": "def",
+                }
+            ]
+            with patch.object(kb._extractor, "extract", return_value=facts):
+                result2 = kb.ingest(path, show_progress=False)
+            assert result2.skipped == 0
+            assert result2.facts >= 1
+
             kb.close()
         finally:
             Path(path).unlink()

@@ -16,6 +16,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > a botched publish; **1.0.2 supersedes it** and is the version users
 > should install going forward.
 
+## [1.0.2.post3] — 2026-05-02
+
+Post-release: internal bugfix, no public API change.
+
+### Fixed
+
+* **Re-ingestion of zero-fact documents.** When a document was
+  previously ingested but produced 0 facts (e.g. because the PDF
+  loader was broken), ``pragma ingest`` would skip it as a
+  "duplicate" on every subsequent attempt. Now the ingest pipeline
+  detects zero-fact documents, deletes the empty record, resets the
+  preprocessor's duplicate-tracking, and re-processes the document
+  from scratch. Added ``document_has_facts`` and ``delete_document``
+  to ``SQLiteStore``.
+
 ## [1.0.2.post2] — 2026-05-02
 
 Post-release: internal bugfix, no public API change.

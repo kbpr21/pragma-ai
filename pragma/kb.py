@@ -168,8 +168,19 @@ class KnowledgeBase:
         doc_id = self._compute_doc_id(source_str)
 
         if self._storage.document_exists(doc_id):
-            logger.debug(f"Skipping already-ingested document: {source}")
-            return IngestResult(documents=0, facts=0, entities=0, skipped=1)
+            # If the document produced zero facts on a previous attempt
+            # (e.g. PDF ingestion was broken), allow re-ingestion by
+            # deleting the empty document record first.
+            if self._storage.document_has_facts(doc_id):
+                logger.debug(f"Skipping already-ingested document: {source}")
+                return IngestResult(documents=0, facts=0, entities=0, skipped=1)
+            logger.info(f"Re-ingesting document with zero facts: {source}")
+            self._storage.delete_document(doc_id)
+            # The preprocessor tracks seen content hashes to avoid
+            # re-processing duplicates within a single ingest session.
+            # When re-ingesting a previously-failed document, the hash
+            # is still in the set, so we must clear it.
+            self._preprocessor.reset_seen()
 
         segments = self._loader.load(source)
         if not segments:

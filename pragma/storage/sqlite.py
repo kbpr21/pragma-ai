@@ -78,6 +78,39 @@ class SQLiteStore:
         cursor = conn.execute("SELECT 1 FROM documents WHERE id = ?", (doc_id,))
         return cursor.fetchone() is not None
 
+    def document_has_facts(self, doc_id: str) -> bool:
+        """Return True if at least one fact references this document's
+        entities. Used to decide whether a previously-ingested document
+        should be re-processed (zero-fact documents are re-ingestible)."""
+        conn = self._get_connection()
+        # Check if any fact's source_doc matches any path registered
+        # under this doc_id. The documents table stores the path in
+        # the ``path`` column; facts reference it via ``source_doc``.
+        row = conn.execute(
+            "SELECT path FROM documents WHERE id = ?", (doc_id,)
+        ).fetchone()
+        if not row:
+            return False
+        path = row[0]
+        cursor = conn.execute(
+            "SELECT 1 FROM facts WHERE source_doc = ? LIMIT 1", (path,)
+        )
+        return cursor.fetchone() is not None
+
+    def delete_document(self, doc_id: str) -> None:
+        """Remove a document record (and any orphaned facts/entities
+        that reference it). Used when re-ingesting a zero-fact document."""
+        conn = self._get_connection()
+        # Get the source path so we can clean up related facts.
+        row = conn.execute(
+            "SELECT path FROM documents WHERE id = ?", (doc_id,)
+        ).fetchone()
+        if row:
+            path = row[0]
+            conn.execute("DELETE FROM facts WHERE source_doc = ?", (path,))
+        conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        conn.commit()
+
     def save_entity(
         self,
         entity_id: str,
