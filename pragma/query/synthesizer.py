@@ -234,9 +234,11 @@ class AnswerSynthesizer:
     ) -> List[Dict[str, Any]]:
         """Drop facts that share no content keyword with the query.
 
-        Falls back to returning the original list if filtering would leave
-        nothing -- it's better to spend a few extra prompt tokens than to
-        leave the LLM with no facts at all.
+        Also matches against the fact's ``context`` field so that facts
+        whose subject/predicate/object are terse but whose source
+        sentence is rich in query-relevant terms still survive the
+        filter. Falls back to returning the original list if filtering
+        would leave nothing.
         """
         keywords = _query_keywords(query)
         if not keywords:
@@ -248,7 +250,8 @@ class AnswerSynthesizer:
             obj_value = (f.get("object_value") or "").lower()
             obj = obj_value or self._resolve(f.get("object_id"), entity_names).lower()
             pred = str(f.get("predicate") or "").lower()
-            blob = f"{subj} {pred} {obj}"
+            context = str(f.get("context") or "").lower()
+            blob = f"{subj} {pred} {obj} {context}"
             score = sum(1 for kw in keywords if kw in blob)
             if score > 0:
                 scored.append((score, f))
@@ -369,7 +372,7 @@ class AnswerSynthesizer:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.0,
-                max_tokens=200,
+                max_tokens=600,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Synthesis LLM call failed: {e}")
@@ -378,6 +381,22 @@ class AnswerSynthesizer:
                 reasoning_steps=[],
                 confidence=0.0,
             )
+
+        # Retry with 2x budget if the model returned empty (common with
+        # diffusion models like Mercury that consume reasoning tokens).
+        if not response or not response.strip():
+            logger.debug("Synthesis: empty response, retrying with 2x max_tokens")
+            try:
+                response = self.llm.complete(
+                    [
+                        {"role": "system", "content": DEFAULT_SYNTHESIS_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.0,
+                    max_tokens=1200,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Synthesis LLM retry failed: {e}")
 
         if not response or not response.strip():
             return SynthesisOutput(

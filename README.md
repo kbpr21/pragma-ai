@@ -8,7 +8,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-358%20passing-brightgreen)](#status)
+[![Tests](https://img.shields.io/badge/tests-359%20passing-brightgreen)](#status)
 
 [Quickstart](#quickstart) ·
 [Why](#why-pragma) ·
@@ -150,11 +150,15 @@ silently shrink the signal. See `tests/unit/test_large_benchmark.py`.
 ## Quickstart
 
 ```bash
-pip install pragma-ai
+pip install "pragma-ai[pdf]"
 pragma connect          # one-time interactive setup, see below
 pragma ingest ./paper.pdf
 pragma query "what is the main contribution of this paper?"
 ```
+
+> **PDF support** requires the `[pdf]` extra (`pip install "pragma-ai[pdf]"`),
+> which installs `pdfplumber` and `pymupdf` for robust extraction including
+> LaTeX-generated papers with pattern fills.
 
 ### `pragma connect` — interactive setup (new in 1.0.2)
 
@@ -239,6 +243,8 @@ Try it without installing: **[Open the Colab quickstart →](docs/quickstart_col
 **Storage:** A single SQLite file (`pragma_kb/pragma.db`) holds entities, facts, edges, and a query cache. The graph lives in NetworkX; BM25 powers seed retrieval. Nothing else to run.
 
 **Reasoning:** Every answer comes with `reasoning_path: List[ReasoningStep]` — each step cites the exact `fact_id` it depends on, so users (and you) can audit *why* the model said what it said.
+
+**Deterministic resolver (1.0.2+):** Canonical question shapes (founder, education, industry, headquarters, etc.) are answered by graph traversal alone — zero LLM calls, sub-millisecond latency. **1.0.3 adds research-paper intents** (core idea, problem caused by, difference, purpose, performance, drop-in replacement) so academic queries like "What is the core idea behind AttnRes?" resolve without invoking the LLM.
 
 ## Benchmarks
 
@@ -328,7 +334,7 @@ print(report.summary())
 
 ## Status
 
-* **289 tests** passing locally (Windows / Python 3.12)
+* **359 tests** passing locally (Windows / Python 3.12)
 * `ruff` clean, type-annotated (`py.typed` shipped)
 * Stable public API at v1.0 — see [CHANGELOG.md](CHANGELOG.md)
 

@@ -196,10 +196,10 @@ class KnowledgeBase:
         processed = self._preprocessor.preprocess(segments)
 
         all_facts = []
-        for i in range(0, len(processed), 10):
-            batch = processed[i : i + 10]
+        for i in range(0, len(processed), 5):
+            batch = processed[i : i + 5]
             if len(batch) > 1:
-                facts = self._extractor.extract_batch(batch, max_tokens=4000)
+                facts = self._extractor.extract_batch(batch, max_tokens=8000)
             else:
                 facts = self._extractor.extract(batch)
             all_facts.extend(facts)

@@ -12,7 +12,7 @@ class TestPragmaConfigDefaults:
         config = PragmaConfig()
 
         assert config.kb_dir == "./pragma_kb"
-        assert config.max_facts_per_segment == 30
+        assert config.max_facts_per_segment == 50
         assert config.fact_confidence_threshold == 0.6
         assert config.default_hop_depth == 2
         assert config.max_subgraph_nodes == 50

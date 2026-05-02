@@ -56,12 +56,14 @@ class FactExtractor:
     def __init__(
         self,
         llm: LLMProvider,
-        max_facts_per_segment: int = 30,
+        max_facts_per_segment: int = 50,
         min_confidence: float = 0.6,
+        max_completion_tokens: int = 6000,
     ) -> None:
         self.llm = llm
         self.max_facts_per_segment = max_facts_per_segment
         self.min_confidence = min_confidence
+        self.max_completion_tokens = max_completion_tokens
 
     def extract(
         self,
@@ -95,21 +97,19 @@ class FactExtractor:
 {segment.content}
 [/DOCUMENT SEGMENT]"""
 
-        try:
-            response = self.llm.complete(
-                [
-                    {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.0,
-                max_tokens=2000,
-            )
-        except Exception as e:
-            logger.warning(f"LLM extraction failed for {segment.source}: {e}")
+        response = self._call_llm(user_prompt)
+        if not response:
+            logger.warning(f"Empty LLM response for segment from {segment.source}")
             return []
 
         facts = self._parse_json_response(response)
         facts = self._filter_by_confidence(facts)
+
+        if not facts:
+            logger.info(
+                f"0 facts parsed from {segment.source} "
+                f"(response {len(response)} chars)"
+            )
 
         for fact in facts:
             fact["_source_doc"] = segment.metadata.get("source_doc", "")
@@ -118,6 +118,44 @@ class FactExtractor:
             fact["_content_hash"] = segment.content_hash
 
         return facts
+
+    def _call_llm(self, user_prompt: str) -> str:
+        """Call the LLM with retry on empty response.
+
+        Diffusion-based models (e.g. Mercury) consume reasoning tokens
+        from the ``max_tokens`` budget. If the budget is too low the
+        model produces an empty completion. We retry once with a
+        larger budget when that happens.
+        """
+        messages = [
+            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        try:
+            response = self.llm.complete(
+                messages,
+                temperature=0.0,
+                max_tokens=self.max_completion_tokens,
+            )
+        except Exception as e:
+            logger.warning(f"LLM call failed: {e}")
+            return ""
+
+        # Some models return empty when the token budget is exhausted
+        # by internal reasoning. Retry once with 2x budget.
+        if not response or not response.strip():
+            logger.debug("Empty response, retrying with 2x max_tokens")
+            try:
+                response = self.llm.complete(
+                    messages,
+                    temperature=0.0,
+                    max_tokens=self.max_completion_tokens * 2,
+                )
+            except Exception as e:
+                logger.warning(f"LLM retry failed: {e}")
+                return ""
+
+        return response or ""
 
     def _parse_json_response(self, response: str) -> List[Dict[str, Any]]:
         """Parse JSON from LLM response robustly.
@@ -241,7 +279,7 @@ class FactExtractor:
     def extract_batch(
         self,
         segments: List[ProcessedSegment],
-        max_tokens: int = 4000,
+        max_tokens: int = 8000,
     ) -> List[Dict[str, Any]]:
         """Extract facts from multiple segments in one LLM call.
 
@@ -273,17 +311,9 @@ class FactExtractor:
 {combined_text}
 [/DOCUMENT SEGMENTS]"""
 
-        try:
-            response = self.llm.complete(
-                [
-                    {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.0,
-                max_tokens=3000,
-            )
-        except Exception as e:
-            logger.warning(f"Batch extraction failed: {e}")
+        response = self._call_llm(user_prompt)
+        if not response:
+            logger.warning("Empty LLM response for batch extraction")
             return []
 
         facts = self._parse_json_response(response)

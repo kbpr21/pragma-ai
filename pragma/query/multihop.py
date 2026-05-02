@@ -117,6 +117,24 @@ def _is_anything(_value: str) -> bool:
     return True
 
 
+def _is_short_phrase(value: str) -> bool:
+    """Accept short phrases (up to ~15 words) but reject full
+    sentences. Research-paper answers like "maintains parallel
+    streams of attention residuals" are short phrases; "We
+    propose a method that achieves 77.3% top-1 accuracy" is a
+    sentence that should not be returned as a direct answer."""
+    if not value:
+        return False
+    v = value.strip()
+    if len(v) < 2:
+        return False
+    # Reject if it starts with a capital letter AND contains a
+    # period (likely a sentence), or is very long.
+    if len(v.split()) > 15:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Intents
 # ---------------------------------------------------------------------------
@@ -348,6 +366,155 @@ INTENTS: Sequence[Intent] = (
         ),
         aggregation=True,
     ),
+    # ------------------------------------------------------------------
+    # Research-paper intents — cover canonical question shapes for
+    # academic / technical documents (core idea, problem, difference,
+    # purpose, performance, drop-in replacement).
+    # ------------------------------------------------------------------
+    Intent(
+        name="core_idea",
+        triggers=(
+            "core idea behind",
+            "core idea of",
+            "main idea behind",
+            "main idea of",
+            "key idea behind",
+            "key insight behind",
+            "key insight of",
+            "central idea",
+            "what is the core idea",
+            "what is the main idea",
+            "what is the key idea",
+        ),
+        predicates=(
+            "has core idea",
+            "core idea is",
+            "key insight is",
+            "main idea is",
+            "proposes",
+            "introduces",
+            "presents",
+        ),
+        object_filter=_is_short_phrase,
+    ),
+    Intent(
+        name="problem_caused_by",
+        triggers=(
+            "problem .. cause",
+            "problem .. standard",
+            "problem with",
+            "issue .. cause",
+            "issue with",
+            "what problem",
+            "issues with",
+            "problems with",
+            "cause .. problem",
+            "causes .. problem",
+        ),
+        predicates=(
+            "causes",
+            "leads to",
+            "results in",
+            "creates",
+            "problem",
+            "issue",
+            "suffers from",
+        ),
+    ),
+    Intent(
+        name="difference",
+        triggers=(
+            "how does .. differ from",
+            "how does .. differ",
+            "difference between",
+            "how does .. differ from traditional",
+            "differs from",
+            "how is .. different from",
+            "how is .. different",
+            "what distinguishes",
+            "what is the difference",
+        ),
+        predicates=(
+            "differs from",
+            "is different from",
+            "unlike",
+            "as opposed to",
+            "in contrast to",
+            "compared to",
+            "improves upon",
+            "modifies",
+            "replaces",
+        ),
+        object_filter=_is_short_phrase,
+    ),
+    Intent(
+        name="purpose",
+        triggers=(
+            "what is the purpose of",
+            "purpose of",
+            "what is .. designed for",
+            "designed for",
+            "aim of",
+            "goal of",
+            "objective of",
+            "why does",
+            "why is",
+        ),
+        predicates=(
+            "is designed for",
+            "is designed to",
+            "aims to",
+            "goal is",
+            "purpose is",
+            "is used for",
+            "serves to",
+        ),
+    ),
+    Intent(
+        name="method_performance",
+        triggers=(
+            "accuracy of",
+            "performance of",
+            "how effective",
+            "how well does",
+            "how does .. validate",
+            "scaling laws",
+            "benchmark results",
+            "results of",
+            "achieves",
+            "outperforms",
+        ),
+        predicates=(
+            "achieves",
+            "outperforms",
+            "reaches",
+            "attains",
+            "has accuracy",
+            "has performance",
+            "improves accuracy by",
+            "improves performance by",
+            "validates",
+        ),
+    ),
+    Intent(
+        name="drop_in_replacement",
+        triggers=(
+            "drop-in replacement",
+            "drop in replacement",
+            "can replace",
+            "is a replacement for",
+            "replaces",
+            "compatible replacement",
+            "direct replacement",
+        ),
+        predicates=(
+            "is a drop-in replacement for",
+            "replaces",
+            "can replace",
+            "is compatible with",
+            "is a replacement for",
+        ),
+    ),
 )
 
 
@@ -364,6 +531,8 @@ _BRIDGE_INTENT_NAMES: Set[str] = {
     "founder",
     "founded_company",
     "acquired_by",
+    "core_idea",
+    "purpose",
 }
 
 

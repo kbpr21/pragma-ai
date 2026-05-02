@@ -4,6 +4,79 @@ All notable changes to **pragma** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] — 2026-05-02
+
+Ingestion + reasoning quality release. Fixes the root cause of empty
+extractions from research-paper PDFs and adds domain-specific intent
+handlers for academic/technical documents. **No breaking API changes.**
+
+### Fixed
+
+* **Fact extraction returned 0 facts from most PDF pages.** The root
+  cause was ``max_tokens=2000`` in the extractor — diffusion-based
+  models (Mercury) consume reasoning tokens from the same budget, so
+  2000 left zero room for the actual JSON output. Bumped to 6000
+  with an automatic 2× retry on empty response. Verified: 466 facts
+  extracted from a 21-page research paper (was 4).
+
+* **Synthesizer returned "unknown" for most queries.** Same
+  ``max_tokens`` problem: the synthesis call used 200 tokens; Mercury
+  needs ~100 just for reasoning. Bumped to 600 with a 2× retry.
+  Also now includes the ``context`` field in the keyword-overlap
+  filter so facts with terse predicates but rich source sentences
+  survive filtering.
+
+* **Re-ingestion of zero-fact documents.** When a document was
+  previously ingested but produced 0 facts (e.g. because the PDF
+  loader was broken), ``pragma ingest`` would skip it as a
+  "duplicate" on every subsequent attempt. Now the pipeline detects
+  zero-fact documents, deletes the empty record, resets the
+  preprocessor's duplicate-tracking, and re-processes from scratch.
+
+* **PDF ingestion broken by pdfplumber 0.11+.** The ``page.tables``
+  attribute was removed in pdfplumber 0.11.x; every page raised
+  ``AttributeError``, killing the entire page including body text.
+  Now uses ``find_tables().extract()`` with ``hasattr`` fallbacks;
+  text extraction isolated from table extraction. Added PyMuPDF
+  (``fitz``) fallback for LaTeX PDFs with ``pgfpat`` pattern fills.
+
+### Added
+
+* **Research-paper intent handlers** for the deterministic multi-hop
+  resolver: ``core_idea``, ``problem_caused_by``, ``difference``,
+  ``purpose``, ``method_performance``, ``drop_in_replacement``.
+  These cover canonical question shapes for academic/technical
+  documents and enable zero-LLM answers for queries like "What is
+  the core idea behind AttnRes?".
+
+* **``_is_short_phrase`` object filter** — accepts concise phrases
+  (≤15 words) but rejects full sentences, preventing the resolver
+  from returning a whole abstract as a "direct answer".
+
+* **``_call_llm`` helper** in ``FactExtractor`` — centralised LLM
+  call with automatic retry on empty response (2× budget). Used by
+  both single-segment and batch extraction paths.
+
+* **``document_has_facts`` and ``delete_document``** on
+  ``SQLiteStore`` — enable the KB to detect and re-ingest
+  previously-failed documents.
+
+* **``pymupdf>=1.24``** added to ``[pdf]`` optional dependencies as
+  a fallback extractor for LaTeX PDFs.
+
+### Changed
+
+* ``FactExtractor`` default ``max_facts_per_segment``: 30 → 50.
+* ``PragmaConfig`` default ``max_facts_per_segment``: 30 → 50.
+* ``FactExtractor`` default ``max_completion_tokens``: 6000 (new
+  parameter; was hardcoded to 2000).
+* ``FactExtractor.extract_batch`` default ``max_tokens``: 4000 →
+  8000.
+* KB ingest batch size: 10 → 5 segments per batch for better
+  per-segment extraction quality.
+* ``AnswerSynthesizer`` synthesis ``max_tokens``: 200 → 600 with
+  2× retry on empty response.
+
 > **A note on the version sequence.** 1.0.0 was the public PyPI launch.
 > 1.0.1 was a same-day metadata fix (license classifier, README links).
 > 1.0.1.post1 was a *post-release* under

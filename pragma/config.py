@@ -11,7 +11,7 @@ class PragmaConfig:
 
     kb_dir: str = "./pragma_kb"
 
-    max_facts_per_segment: int = 30
+    max_facts_per_segment: int = 50
     fact_confidence_threshold: float = 0.6
 
     default_hop_depth: int = 2
