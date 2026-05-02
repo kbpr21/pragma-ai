@@ -8,7 +8,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-289%20passing-brightgreen)](#status)
+[![Tests](https://img.shields.io/badge/tests-358%20passing-brightgreen)](#status)
 
 [Quickstart](#quickstart) ·
 [Why](#why-pragma) ·
@@ -88,18 +88,98 @@ answered both correctly but spent 32 % more prompt tokens overall.
    correctly. We consider the honest behaviour the right default; you
    can re-ingest with a stronger model to fix the underlying facts.
 
+### Realistic-scale benchmark — 50 documents, 12 queries (new in 1.0.2)
+
+The 4-paragraph numbers above are honest but unconvincing on their
+own. The realistic-scale harness ingests **50 cross-referenced
+documents (~9,000 tokens of corpus, 1,084 atomic facts, 484 entities
+extracted)** and runs a mix of single-hop, multi-hop, and aggregation
+queries against pragma vs a **BM25 top-k baseline** — i.e. the
+*right* enemy for vector-RAG, not "stuff the whole corpus in the
+prompt".
+
+Both systems use the same Ollama model
+(`deepseek-v3.1:671b-cloud`); tokens are counted by the model's own
+tokenizer (`prompt_eval_count` / `eval_count`).
+
+| Metric (avg over 12 ground-truth-scored queries) | BM25 top-3 RAG | **pragma** |
+|---|---|---|
+| Accuracy (substring match) | 12/12 | **12/12** |
+| Multi-hop accuracy (2–3 hop) | 6/6 | **6/6** |
+| Prompt tokens | 614 | **0** (12/12 zero-LLM) |
+| Completion tokens | 8 | **0** (12/12 zero-LLM) |
+| Latency-zero answers (deterministic resolver) | 0 | **12** |
+
+**Honest read of these numbers**:
+
+* **12/12 accuracy, matching RAG — with zero LLM calls.** The
+  deterministic `MultiHopResolver` walks the graph directly for
+  all query types: single-entity lookups, multi-hop chains
+  (founder→education, acquired_by→founder), reverse lookups
+  (product→company), and aggregation (companies in a city).
+* **Zero prompt + completion tokens.** Every query is answered
+  by graph traversal alone; the LLM is never invoked. This is
+  the latency ceiling: answers return as fast as a SQLite query.
+
+Per-query JSON with answers + token counts + which docs RAG
+retrieved is written to `benchmarks_run/results_large.json` so
+anyone can audit the run.
+
 Reproduce these numbers yourself:
 
 ```bash
-ollama pull minimax-m2.7:cloud      # or any chat model
+ollama pull deepseek-v3.1:671b-cloud   # or any chat model
+
+# Small honesty harness (4-paragraph corpus, 2 queries, very fast):
 python benchmarks_run/run.py        # writes results.json + prints summary
+
+# Realistic-scale benchmark (50 documents, 12 queries, ~10-25 minutes
+# depending on the model -- ingestion is one-shot and can be reused
+# with --no-ingest on subsequent runs):
+python benchmarks_run/large_corpus.py     # (re-)materialise corpus
+python benchmarks_run/run_large.py --model deepseek-v3.1:671b-cloud
+# subsequent runs skip ingestion:
+python benchmarks_run/run_large.py --no-ingest
 ```
+
+The large benchmark is **deterministic**: the corpus is regenerated
+byte-for-byte from the data tables in `benchmarks_run/large_corpus.py`
+on every run, and a unit test pins this so future changes can't
+silently shrink the signal. See `tests/unit/test_large_benchmark.py`.
 
 ## Quickstart
 
 ```bash
 pip install pragma-ai
+pragma connect          # one-time interactive setup, see below
+pragma ingest ./paper.pdf
+pragma query "what is the main contribution of this paper?"
 ```
+
+### `pragma connect` — interactive setup (new in 1.0.2)
+
+The first thing to run after install. The wizard walks you through:
+
+1. **Picking a provider** — Ollama (local, no API key), OpenAI, Anthropic,
+   Groq, or Inception.
+2. **Pasting your API key** (input is hidden) for cloud providers, or
+   confirming the URL for Ollama.
+3. **Picking a model from the live list** — pragma calls the provider's
+   own `/v1/models` (or `/api/tags` for Ollama) endpoint to discover
+   what your account / local install actually offers, so you do not
+   have to memorise model names.
+
+The result is saved to a private local config file
+(`~/.pragma/config.json` on POSIX, `%USERPROFILE%\.pragma\config.json`
+on Windows, mode `0600` where supported). Subsequent `pragma ingest`
+and `pragma query` commands pick it up automatically. Re-run any time
+to switch provider; `pragma connect --reset` deletes the saved config.
+
+If you prefer environment variables (CI, servers, secret managers)
+they still work as a fallback: `INCEPTION_API_KEY`, `OPENAI_API_KEY`,
+`GROQ_API_KEY`, `ANTHROPIC_API_KEY`.
+
+### Programmatic usage
 
 ```python
 from pragma import KnowledgeBase
@@ -131,11 +211,15 @@ async for token in kb.stream("Who is the CEO of Apple?"):
 CLI:
 
 ```bash
-pragma ingest ./docs/
+pragma connect                      # one-time: pick provider + model
+pragma ingest                       # no path? ingests every supported file in cwd
+pragma ingest ./paper.pdf           # one file
+pragma ingest ./docs/               # whole directory (recursive)
 pragma query "What does pragma do?"
 pragma stats
 pragma facts --entity "Apple"
 pragma entities
+pragma connect --reset              # forget saved config
 ```
 
 Try it without installing: **[Open the Colab quickstart →](docs/quickstart_colab.ipynb)**
@@ -215,7 +299,7 @@ from pragma import PragmaConfig
 config = PragmaConfig(
     kb_dir="./pragma_kb",
     default_hop_depth=2,
-    max_subgraph_nodes=5,
+    max_subgraph_nodes=50,    # 1.0.2: bumped from 5 (see CHANGELOG)
     fact_confidence_threshold=0.6,
     llm_provider="groq",
 )
@@ -225,7 +309,7 @@ config = PragmaConfig(
 |---|---|
 | `PRAGMA_KB_DIR` | `./pragma_kb` |
 | `PRAGMA_DEFAULT_HOP_DEPTH` | `2` |
-| `PRAGMA_MAX_SUBGRAPH_NODES` | `5` |
+| `PRAGMA_MAX_SUBGRAPH_NODES` | `50` (was `5` in 1.0.1; floor is 5) |
 | `PRAGMA_FACT_CONFIDENCE_THRESHOLD` | `0.6` |
 | `PRAGMA_PROMPT_<NAME>` | path to override built-in prompt |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `INCEPTION_API_KEY` | — |

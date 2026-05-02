@@ -92,7 +92,6 @@ class KnowledgeBase:
         if isinstance(source, (list, dict)):
             sources = source if isinstance(source, list) else [source]
         else:
-            source = Path(source) if not isinstance(source, str) else source
             # ``Path(source).is_dir()`` calls os.stat under the hood, which
             # raises OSError on POSIX when the string is longer than the
             # platform's NAME_MAX (typically 255 chars). When ``source`` is
@@ -104,7 +103,11 @@ class KnowledgeBase:
             except (OSError, ValueError):
                 is_dir = False
             if is_dir:
-                sources = self._discover_files(source)
+                # _discover_files needs a Path (it calls .rglob); the prior
+                # version forgot to coerce strings, so passing a string-typed
+                # directory produced ``AttributeError: 'str' object has no
+                # attribute 'rglob'`` for any user calling kb.ingest("./docs").
+                sources = self._discover_files(Path(source))
             else:
                 sources = [source]
 
@@ -294,6 +297,7 @@ class KnowledgeBase:
         from pragma.query.retriever import BM25Retriever
         from pragma.query.assembler import FactAssembler
         from pragma.query.synthesizer import AnswerSynthesizer
+        from pragma.query.multihop import MultiHopResolver, _RealStorageAdapter
 
         if as_of:
             as_of_date = (
@@ -301,6 +305,93 @@ class KnowledgeBase:
             )
         else:
             as_of_date = None
+
+        # ------------------------------------------------------------------
+        # Fast-path: deterministic graph walker for canonical question
+        # shapes ("X of Y", "what is X of Y", "where did .. study", ...).
+        # See pragma/query/multihop.py for the design rationale. When the
+        # walker fires we skip the LLM entirely (zero tokens, sub-ms
+        # latency); when it cannot match the query confidently it returns
+        # None and the existing decompose/retrieve/assemble/synthesize
+        # path runs unchanged.
+        # ------------------------------------------------------------------
+        if not as_of_date:  # temporal queries always go through full pipeline
+            try:
+                resolver = MultiHopResolver(
+                    _RealStorageAdapter(self._graph_builder, self._storage)
+                )
+                hit = resolver.try_resolve(query)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("multi-hop resolver crashed (%s); falling through", e)
+                hit = None
+            if hit is not None:
+                reasoning_path = [
+                    ReasoningStep(
+                        fact_id=fid or "",
+                        explanation=expl,
+                        hop_number=i,
+                    )
+                    for i, (fid, expl) in enumerate(zip(hit.fact_ids, hit.bridge_chain))
+                ]
+                # Hydrate the source facts so callers can render citations
+                # the same way the synthesizer path does. SQLiteStore has
+                # no get_fact_by_id helper, so query the active table
+                # directly and resurrect AtomicFact rows.
+                src_facts = []
+                if hit.fact_ids:
+                    try:
+                        conn = self._storage._get_connection()
+                        placeholders = ",".join("?" * len(hit.fact_ids))
+                        rows = conn.execute(
+                            f"SELECT * FROM facts WHERE id IN ({placeholders})",
+                            tuple(hit.fact_ids),
+                        ).fetchall()
+
+                        for row in rows:
+                            try:
+                                from dataclasses import fields as _dc_fields
+                                from datetime import datetime as _dt
+
+                                _af_fields = {f.name for f in _dc_fields(AtomicFact)}
+                                _datetime_fields = {
+                                    "ingested_at",
+                                    "valid_from",
+                                    "valid_until",
+                                }
+                                filtered = {
+                                    k: v
+                                    for k, v in dict(row).items()
+                                    if k in _af_fields
+                                }
+                                for _df in _datetime_fields:
+                                    if _df in filtered and isinstance(
+                                        filtered[_df], str
+                                    ):
+                                        try:
+                                            filtered[_df] = _dt.fromisoformat(
+                                                filtered[_df]
+                                            )
+                                        except (ValueError, TypeError):
+                                            filtered[_df] = None
+                                src_facts.append(AtomicFact(**filtered))
+                            except Exception:  # noqa: BLE001
+                                # Schema mismatch / extra columns: keep
+                                # going with whatever rows we can build.
+                                continue
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("could not hydrate resolver source_facts: %s", e)
+
+                result = PragmaResult(
+                    answer=hit.answer,
+                    reasoning_path=reasoning_path,
+                    source_facts=src_facts,
+                    confidence=hit.confidence,
+                    tokens_used=0,  # by construction
+                    latency_ms=(time.time() - start_time) * 1000,
+                    subgraph_size=len(hit.fact_ids),
+                )
+                self._storage.save_query_cache(cache_key, query, result)
+                return result
 
         decomposer = QueryDecomposer(self._llm, max_subquestions=top_k)
         retriever = BM25Retriever(self._graph_builder)
@@ -345,7 +436,12 @@ class KnowledgeBase:
             self._storage.save_query_cache(cache_key, query, result)
             return result
 
-        facts = assembler.assemble_facts(subgraph, as_of=as_of_date)
+        # Pass the query through so the assembler ranks facts by query
+        # overlap before trimming. Critical at multi-document scale where
+        # confidence is uniform; without this the trim drops query-relevant
+        # facts in favour of unrelated facts that happened to be reachable
+        # via hub-node bridges (e.g. shared "enterprise customers" objects).
+        facts = assembler.assemble_facts(subgraph, as_of=as_of_date, query=query)
 
         if not facts:
             result = PragmaResult(
@@ -509,7 +605,7 @@ class KnowledgeBase:
             yield "Insufficient knowledge in KB for this query"
             return
 
-        facts = assembler.assemble_facts(subgraph)
+        facts = assembler.assemble_facts(subgraph, query=query)
         if not facts:
             yield "Insufficient knowledge in KB for this query"
             return

@@ -90,6 +90,71 @@ class TestFactAssembler:
 
         assert sorted_facts[0]["confidence"] == 0.9
 
+    def test_sort_prefers_query_overlap_over_confidence(self):
+        """Regression for the v1.0.2 large-benchmark correctness bug:
+        on multi-document subgraphs the assembler's confidence-only
+        sort dropped query-relevant facts during the token-budget trim.
+        With the query supplied, facts that overlap query keywords must
+        rank above unrelated facts even when their confidence is lower."""
+        builder = MockGraphBuilder()
+        builder.entities["helix"] = Entity("helix", "Helix Robotics", "ORG", [], None)
+        builder.entities["maya"] = Entity("maya", "Maya Chen", "PERSON", [], None)
+        builder.entities["yara"] = Entity("yara", "Yara Haddad", "PERSON", [], None)
+
+        # Yara's facts have *higher* confidence (1.0) than the relevant
+        # Helix fact (0.7). Without query-aware ranking, Yara would win.
+        facts = [
+            make_fact_dict(
+                "f1",
+                "yara",
+                "studied at",
+                confidence=1.0,
+                object_value="American University of Beirut",
+            ),
+            make_fact_dict(
+                "f2", "yara", "is", confidence=1.0, object_value="entrepreneur"
+            ),
+            # The fact that actually answers the query, but lower conf:
+            make_fact_dict(
+                "f3", "helix", "was founded by", confidence=0.7, object_id="maya"
+            ),
+        ]
+
+        assembler = FactAssembler(builder)
+        sorted_facts = assembler._sort_facts(facts, query="Who founded Helix Robotics?")
+
+        # The Helix fact must come first now.
+        assert sorted_facts[0]["id"] == "f3", [f["id"] for f in sorted_facts]
+
+    def test_sort_falls_back_to_confidence_when_no_query(self):
+        """Backwards-compat: callers that don't supply a query still get
+        the original confidence-DESC ordering -- no surprise behaviour
+        change for code that pre-dates 1.0.2."""
+        builder = MockGraphBuilder()
+        facts = [
+            make_fact_dict("f1", "e1", "rel", confidence=0.5),
+            make_fact_dict("f2", "e1", "rel", confidence=0.9),
+            make_fact_dict("f3", "e1", "rel", confidence=0.7),
+        ]
+        assembler = FactAssembler(builder)
+        sorted_facts = assembler._sort_facts(facts)  # no query
+        assert [f["confidence"] for f in sorted_facts] == [0.9, 0.7, 0.5]
+
+    def test_extract_query_keywords_drops_stopwords_and_punctuation(self):
+        """The keyword extractor must strip the question-word stopwords
+        (``who`` / ``what`` / ``where``) and trailing punctuation so a
+        sentence like 'Who founded Helix Robotics?' yields exactly the
+        content terms ``{founded, helix, robotics}``."""
+        kw = FactAssembler._extract_query_keywords("Who founded Helix Robotics?")
+        assert kw == {"founded", "helix", "robotics"}
+        # Single-character tokens and bare digits >1 char are kept; bare
+        # single chars are dropped to avoid noise from initials.
+        kw2 = FactAssembler._extract_query_keywords(
+            "In what year was BlueCell Storage founded?"
+        )
+        assert "year" in kw2 and "bluecell" in kw2 and "storage" in kw2
+        assert "in" not in kw2 and "what" not in kw2 and "was" not in kw2
+
     def test_trim_by_token_budget(self):
         builder = MockGraphBuilder()
         builder.entities["e1"] = Entity("e1", "Entity1", "ORG", [], None)

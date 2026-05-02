@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pragma-ai"
-# PEP 440 post-release: same code as 1.0.1, with measured token-efficiency
-# improvements (no new API). Bumps to 1.0.1.post1, .post2 etc are reserved
-# for republishes that don't change behaviour from a user's perspective.
-version = "1.0.1.post1"
+# 1.0.2 adds the `pragma connect` interactive setup wizard,
+# auto-discovery of available models per provider, and persistent user
+# config at ~/.pragma/config.json. No breaking API changes.
+version = "1.0.2"
 description = "Atomic-fact reasoning over a knowledge graph. A RAG alternative that needs no vector database."
 readme = "README.md"
 license = {text = "MIT"}

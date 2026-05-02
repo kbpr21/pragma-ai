@@ -157,10 +157,16 @@ attention.pdf
 *.tmp
 *.bak
 
-# Benchmark run outputs (the harness ships in the repo, the outputs do not)
+# Benchmark run outputs (the harness ships in the repo, the outputs do not).
+# The large corpus generator IS source-controlled (large_corpus.py), but the
+# materialised txt files and the kb/ ingestion artefact are not.
 benchmarks_run/kb/
+benchmarks_run/kb_large/
+benchmarks_run/large_corpus/
 benchmarks_run/output*.txt
 benchmarks_run/results.json
+benchmarks_run/results_large.json
+benchmarks_run/queries_large.json
 
 # Editor swap files
 *.orig

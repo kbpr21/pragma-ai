@@ -15,7 +15,7 @@ class TestPragmaConfigDefaults:
         assert config.max_facts_per_segment == 30
         assert config.fact_confidence_threshold == 0.6
         assert config.default_hop_depth == 2
-        assert config.max_subgraph_nodes == 5
+        assert config.max_subgraph_nodes == 50
         assert config.max_subquestions == 5
         assert config.enable_query_cache is True
         assert config.query_cache_ttl == 3600
@@ -206,7 +206,10 @@ class TestPragmaConfigToDict:
 
 
 class TestPragmaConfigValidation:
-    def test_max_subgraph_nodes_minimum(self):
-        config = PragmaConfig(max_subgraph_nodes=3)
-
-        assert config.max_subgraph_nodes == 5
+    def test_max_subgraph_nodes_floor(self):
+        # Values below 5 are clamped up to 5 to keep multi-hop recall
+        # non-trivial; values >= 5 are passed through unchanged.
+        assert PragmaConfig(max_subgraph_nodes=3).max_subgraph_nodes == 5
+        assert PragmaConfig(max_subgraph_nodes=0).max_subgraph_nodes == 5
+        assert PragmaConfig(max_subgraph_nodes=10).max_subgraph_nodes == 10
+        assert PragmaConfig(max_subgraph_nodes=50).max_subgraph_nodes == 50

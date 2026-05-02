@@ -144,3 +144,52 @@ class OpenAIProvider:
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def list_models(
+        cls,
+        api_key: str,
+        base_url: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> List[Dict[str, Any]]:
+        """Return the chat-completion-capable models for this API key.
+
+        OpenAI's ``/v1/models`` endpoint returns a long list that
+        includes embeddings, audio, image, and moderation models we
+        do not care about here. We filter to chat-completion-suitable
+        IDs (anything starting with ``gpt`` or ``o`` plus the lone
+        ``chatgpt-*`` family) so the wizard does not bury the user
+        under ``text-embedding-*`` and ``whisper-*``.
+        """
+        url = (base_url or cls.BASE_URL).rstrip("/")
+        try:
+            resp = httpx.get(
+                f"{url}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=timeout,
+            )
+        except httpx.HTTPError as e:
+            raise LLMError(f"Cannot reach OpenAI /v1/models at {url}: {e}")
+        if resp.status_code == 401:
+            raise LLMError("OpenAI API key was rejected (401 Unauthorized).")
+        if resp.status_code != 200:
+            raise LLMError(
+                f"OpenAI /v1/models returned {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json().get("data", []) or []
+        chat_like = []
+        for m in data:
+            mid = m.get("id", "")
+            if not mid:
+                continue
+            low = mid.lower()
+            if low.startswith(("gpt-", "o1", "o3", "o4", "chatgpt", "gpt4", "gpt5")):
+                chat_like.append(m)
+        # Stable sort: most recent / highest-tier first by simple string
+        # heuristic ("gpt-5..." > "gpt-4..."), then alphabetical.
+        chat_like.sort(key=lambda m: m.get("id", ""), reverse=True)
+        return chat_like

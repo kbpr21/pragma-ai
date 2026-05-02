@@ -15,7 +15,12 @@ class PragmaConfig:
     fact_confidence_threshold: float = 0.6
 
     default_hop_depth: int = 2
-    max_subgraph_nodes: int = 5
+    # 50 was the original design target. v1.0.1 shipped with 5 by
+    # mistake, which silently capped multi-hop recall on any KB beyond
+    # toy size: a 2-hop traversal that finds 6 candidate nodes would
+    # drop the 6th. v1.0.2 restores 50; users who really want a tighter
+    # context window can set PRAGMA_MAX_SUBGRAPH_NODES.
+    max_subgraph_nodes: int = 50
 
     max_subquestions: int = 5
     enable_query_cache: bool = True
@@ -32,6 +37,10 @@ class PragmaConfig:
     max_tokens_per_call: int = 1000
 
     def __post_init__(self) -> None:
+        # Floor of 5 keeps obviously-wrong values (0, negative) from
+        # producing empty subgraphs. We do NOT raise above 5 anymore --
+        # users who explicitly set a small value (e.g. for unit tests
+        # or memory-constrained edge devices) are trusted.
         if self.max_subgraph_nodes < 5:
             self.max_subgraph_nodes = 5
 
@@ -93,7 +102,7 @@ class PragmaConfig:
             max_facts_per_segment=30,
             fact_confidence_threshold=0.6,
             default_hop_depth=2,
-            max_subgraph_nodes=5,
+            max_subgraph_nodes=50,
             max_subquestions=5,
             enable_query_cache=True,
             query_cache_ttl=3600,

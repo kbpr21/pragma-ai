@@ -27,12 +27,18 @@ class FactAssembler:
         self,
         subgraph: nx.MultiDiGraph,
         as_of: datetime = None,
+        query: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Assemble facts from subgraph edges.
 
         Args:
             subgraph: Extracted subgraph from traversal
             as_of: Filter facts valid at this point in time
+            query: The natural-language query, used to rank facts by
+                keyword overlap so the most query-relevant survive the
+                token-budget trim. Optional for backward compat -- the
+                caller (KnowledgeBase.query) always supplies it; older
+                callers fall back to confidence-only ranking.
 
         Returns:
             List of fact dicts ready for LLM prompt
@@ -77,7 +83,13 @@ class FactAssembler:
 
         filtered = self._filter_facts(all_facts)
         deduplicated = self._deduplicate_facts(filtered)
-        sorted_facts = self._sort_facts(deduplicated)
+        # Critical: rank by query-keyword overlap BEFORE the token-budget
+        # trim. Without this, on multi-document subgraphs where many
+        # entities share ~uniform confidence, the trim kept arbitrary
+        # facts and dropped the ones the query was actually about. This
+        # was the 50-doc-scale correctness regression caught by the
+        # large benchmark (1/12 queries correct -> see CHANGELOG 1.0.2).
+        sorted_facts = self._sort_facts(deduplicated, query=query)
         trimmed = self._trim_by_token_budget(sorted_facts)
 
         return trimmed
@@ -188,16 +200,92 @@ class FactAssembler:
     def _sort_facts(
         self,
         facts: List[Dict[str, Any]],
+        query: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Sort by confidence DESC, then ingested_at DESC."""
-        return sorted(
-            facts,
-            key=lambda f: (
-                f.get("confidence", 0),
+        """Sort by query-overlap DESC, then confidence DESC, then ingested_at DESC.
+
+        Without a query the original confidence-only order is used --
+        that's what every caller before 1.0.2 relied on. With a query,
+        we score each fact by how many query keywords appear anywhere
+        in its ``subject_name + predicate + object_name/value`` blob.
+        This is intentionally simple (lowercase substring match, with
+        a tiny stopword set) -- the synthesizer does a similar pass
+        downstream, but doing it here too means the *trim* prefers
+        relevant facts instead of dropping them.
+        """
+        if query:
+            keywords = self._extract_query_keywords(query)
+        else:
+            keywords = set()
+
+        def score(f: Dict[str, Any]) -> Tuple[int, float, str]:
+            overlap = 0
+            if keywords:
+                subj = self._get_entity_name(f.get("subject_id")).lower()
+                obj_v = (f.get("object_value") or "").lower()
+                obj = obj_v or self._get_entity_name(f.get("object_id")).lower()
+                pred = str(f.get("predicate") or "").lower()
+                blob = f"{subj} {pred} {obj}"
+                overlap = sum(1 for kw in keywords if kw in blob)
+            return (
+                overlap,
+                float(f.get("confidence", 0) or 0),
                 str(f.get("ingested_at", "")),
-            ),
-            reverse=True,
-        )
+            )
+
+        return sorted(facts, key=score, reverse=True)
+
+    # Stopwords stripped from query before keyword scoring -- short list
+    # focused on the question-words and common articles that would
+    # otherwise match every fact equally and contribute zero ranking signal.
+    _QUERY_STOPWORDS = frozenset(
+        {
+            "a",
+            "an",
+            "and",
+            "are",
+            "as",
+            "at",
+            "be",
+            "by",
+            "do",
+            "does",
+            "for",
+            "from",
+            "how",
+            "in",
+            "is",
+            "it",
+            "of",
+            "on",
+            "or",
+            "that",
+            "the",
+            "to",
+            "was",
+            "were",
+            "what",
+            "when",
+            "where",
+            "which",
+            "who",
+            "why",
+            "with",
+        }
+    )
+
+    @classmethod
+    def _extract_query_keywords(cls, query: str) -> set:
+        """Tokenise *query* into content-bearing keywords.
+
+        Lowercases, strips punctuation, drops stopwords, and skips
+        single-character tokens. The result is a set so repeated terms
+        in the query don't double-count in the overlap score.
+        """
+        import re
+
+        toks = re.findall(r"[a-z0-9]+", query.lower())
+        return {t for t in toks if len(t) > 1 and t not in cls._QUERY_STOPWORDS}
 
     def _trim_by_token_budget(
         self,

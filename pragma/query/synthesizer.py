@@ -31,12 +31,20 @@ from pragma.prompts import load_prompt
 logger = logging.getLogger(__name__)
 
 
-# Single-line, ~20-token directive. The schema example tells the model the
-# exact shape we want; no list of "rules" required.
+# Prompt that teaches the LLM to chain facts for multi-hop questions.
+# The original single-line prompt was too terse: the LLM returned
+# "unknown" when it needed to compose two facts (e.g. founder + alma
+# mater). The revised prompt includes an explicit chaining example and
+# a rule that says "combine facts if no single fact answers".
 _BUILTIN_SYNTHESIS_PROMPT = (
     "Answer briefly using ONLY these facts. "
+    "If no single fact answers, COMBINE multiple facts: e.g. if F1 says "
+    "'QubitForge --was founded by--> Sofia Petrova' and F2 says "
+    "'Sofia Petrova --studied at--> Cambridge', then for 'Where did the "
+    "founder of QubitForge study?' answer Cambridge using [F1,F2]. "
     'Output one JSON object: {"a":"answer","f":["F1","F2"]} -- "f" is the '
-    'list of fact IDs you used. If none answer, set "a":"unknown" and "f":[].'
+    "list of fact IDs you used. If none answer even after combining, set "
+    '"a":"unknown" and "f":[].'
 )
 
 

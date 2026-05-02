@@ -28,6 +28,31 @@ We follow these conventions:
   Optional features (PDF, DOCX, HTML, etc.) live behind extras in
   `pyproject.toml`.
 
+### A note on commit granularity (from 1.0.2 onwards)
+
+The pre-1.0.2 history was squashed into a small number of large commits
+during the launch sprint. That made the early development story hard to
+reconstruct, and we are not rewriting published history to fix it. From
+**1.0.2 onwards** we are adopting one-commit-per-logical-change as the
+default — concretely:
+
+* **One subsystem per commit** (e.g. *just* the wizard, *just* the
+  `list_models()` additions, *just* the benchmark generator). Mixing
+  unrelated changes in one commit is the single most common reason a
+  contributor cannot follow the diff later.
+* **Conventional Commit prefixes are mandatory**: `feat`, `fix`, `docs`,
+  `test`, `refactor`, `chore`, `bench`. The prefix carries weight in
+  the changelog and in `git log --grep`.
+* **Tests in the same commit as the code they cover.** A `feat` commit
+  whose tests land in a follow-up `test` commit will be asked to be
+  squashed into a single commit before merge.
+* **PRs target one thing.** A PR that touches three subsystems should
+  be three PRs unless they are genuinely interdependent — and even
+  then, prefer a stack over a single mega-PR.
+
+If your local history is messy, `git rebase -i` before opening the PR.
+We are happy to help with the rebase if it is a first-time contribution.
+
 ## Project layout
 
 ```text

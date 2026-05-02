@@ -144,6 +144,25 @@ class TestKnowledgeBaseIngest:
         assert result.documents == 2
         kb.close()
 
+    def test_ingest_directory_as_str(self, tmp_path):
+        """Regression: kb.ingest("./docs") used to crash with
+        ``AttributeError: 'str' object has no attribute 'rglob'``
+        because the str -> Path coercion was inverted. Passing the
+        directory as a *string* must work the same as passing a
+        ``Path`` object."""
+        dir_path = tmp_path / "docs"
+        dir_path.mkdir()
+        (dir_path / "a.txt").write_text("Content A")
+        (dir_path / "b.txt").write_text("Content B")
+
+        kb = KnowledgeBase(llm=MockLLMProvider("[]"), kb_dir=str(tmp_path / "kb"))
+
+        with patch.object(kb._extractor, "extract", return_value=[]):
+            result = kb.ingest(str(dir_path), show_progress=False)
+
+        assert result.documents == 2
+        kb.close()
+
     def test_ingest_extracts_facts(self, tmp_path):
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", delete=False, encoding="utf-8"

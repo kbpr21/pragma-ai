@@ -163,3 +163,46 @@ class AnthropicProvider:
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def list_models(
+        cls,
+        api_key: str,
+        base_url: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> List[Dict[str, Any]]:
+        """Return the available models via Anthropic's ``/v1/models``
+        endpoint.
+
+        Anthropic uses an ``x-api-key`` header (not ``Authorization``)
+        and requires the ``anthropic-version`` header. The response
+        shape matches OpenAI's enough that callers can treat the
+        returned list of ``{"id": "...", "display_name": "..."}``
+        dicts uniformly.
+        """
+        url = (base_url or cls.BASE_URL).rstrip("/")
+        try:
+            resp = httpx.get(
+                f"{url}/models",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                timeout=timeout,
+            )
+        except httpx.HTTPError as e:
+            raise LLMError(f"Cannot reach Anthropic /v1/models at {url}: {e}")
+        if resp.status_code == 401:
+            raise LLMError("Anthropic API key was rejected (401 Unauthorized).")
+        if resp.status_code != 200:
+            raise LLMError(
+                f"Anthropic /v1/models returned {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json().get("data", []) or []
+        # Newest-first by id (anthropic IDs include the date suffix).
+        data.sort(key=lambda m: m.get("id", ""), reverse=True)
+        return data

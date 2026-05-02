@@ -144,3 +144,45 @@ class GroqProvider:
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def list_models(
+        cls,
+        api_key: str,
+        base_url: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> List[Dict[str, Any]]:
+        """Return the available chat models via Groq's OpenAI-compatible
+        ``/openai/v1/models`` endpoint.
+
+        Groq's catalogue is small and curated, so we return everything
+        the API surfaces (filtering only obvious whisper/audio entries).
+        """
+        url = (base_url or cls.BASE_URL).rstrip("/")
+        try:
+            resp = httpx.get(
+                f"{url}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=timeout,
+            )
+        except httpx.HTTPError as e:
+            raise LLMError(f"Cannot reach Groq /v1/models at {url}: {e}")
+        if resp.status_code == 401:
+            raise LLMError("Groq API key was rejected (401 Unauthorized).")
+        if resp.status_code != 200:
+            raise LLMError(
+                f"Groq /v1/models returned {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json().get("data", []) or []
+        chat_models = [
+            m
+            for m in data
+            if "whisper" not in m.get("id", "").lower()
+            and "tts" not in m.get("id", "").lower()
+        ]
+        chat_models.sort(key=lambda m: m.get("id", ""))
+        return chat_models

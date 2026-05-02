@@ -164,3 +164,35 @@ class InceptionProvider:
                 )
             except httpx.RequestError as e:
                 raise LLMError(f"Inception API request failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def list_models(
+        cls,
+        api_key: str,
+        base_url: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> List[Dict[str, Any]]:
+        """Return the available chat models via Inception/Mercury's
+        OpenAI-compatible ``/v1/models`` endpoint."""
+        url = (base_url or cls.BASE_URL).rstrip("/")
+        try:
+            resp = httpx.get(
+                f"{url}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=timeout,
+            )
+        except httpx.HTTPError as e:
+            raise LLMError(f"Cannot reach Inception /v1/models at {url}: {e}")
+        if resp.status_code == 401:
+            raise LLMError("Inception API key was rejected (401 Unauthorized).")
+        if resp.status_code != 200:
+            raise LLMError(
+                f"Inception /v1/models returned {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json().get("data", []) or []
+        data.sort(key=lambda m: m.get("id", ""))
+        return data

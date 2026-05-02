@@ -126,3 +126,44 @@ class OllamaProvider:
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def list_models(
+        cls,
+        base_url: Optional[str] = None,
+        timeout: float = 5.0,
+    ) -> List[Dict[str, Any]]:
+        """Return the locally-installed models.
+
+        Hits Ollama's ``/api/tags`` endpoint (no auth required) and
+        returns the list verbatim. Each item has at least a ``name``
+        field; size, digest, modified_at etc. are passed through
+        unchanged so the wizard can show a nicer picker.
+
+        Raises :class:`LLMError` when Ollama is not reachable so
+        callers can surface a friendly "is Ollama running?" message.
+        """
+        url = (base_url or cls.BASE_URL).rstrip("/")
+        try:
+            resp = httpx.get(f"{url}/api/tags", timeout=timeout)
+        except httpx.HTTPError as e:
+            raise LLMError(
+                f"Cannot reach Ollama at {url}. Is it running? "
+                f"Try: ollama serve  ({e})"
+            )
+        if resp.status_code != 200:
+            raise LLMError(
+                f"Ollama /api/tags returned {resp.status_code}: {resp.text[:200]}"
+            )
+        try:
+            payload = resp.json()
+        except json.JSONDecodeError as e:
+            raise LLMError(f"Ollama returned non-JSON: {e}")
+        models = payload.get("models", [])
+        if not isinstance(models, list):
+            return []
+        return models
