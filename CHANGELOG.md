@@ -16,6 +16,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > a botched publish; **1.0.2 supersedes it** and is the version users
 > should install going forward.
 
+## [1.0.2.post2] — 2026-05-02
+
+Post-release: internal bugfix, no public API change.
+
+### Fixed
+
+* **PDF ingestion completely broken with pdfplumber 0.11+.** The
+  ``page.tables`` attribute was removed in pdfplumber 0.11.x; every
+  page raised ``AttributeError: 'Page' object has no attribute
+  'tables'``, which killed the entire page (including successfully
+  extracted body text). Now uses ``find_tables().extract()`` with a
+  ``hasattr`` fallback for older pdfplumber versions. Table extraction
+  is also isolated from text extraction so a table API error cannot
+  discard the page's body text.
+
+* **LaTeX PDFs with pattern fills (pgfpat) now fall back to PyMuPDF.**
+  pdfplumber returns empty text for pages with ``pgfpat`` pattern
+  fills (common in LaTeX-generated research papers). Added
+  ``_pymupdf_fallback`` that tries ``fitz`` (PyMuPDF) per-page when
+  pdfplumber yields nothing. PyMuPDF is now an optional dependency
+  under ``[pdf]``.
+
 ## [1.0.2] — 2026-05-02
 
 First-run UX + scale-honesty release. Adds the `pragma connect`
