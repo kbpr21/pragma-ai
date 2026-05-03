@@ -686,3 +686,83 @@ def test_grounded_answer_not_penalized() -> None:
         entity_names={"attnres": "AttnRes"},
     )
     assert result.confidence >= 0.7
+
+
+def test_multi_question_partial_coverage_penalized() -> None:
+    """Multi-question answers with 'Not covered' sub-questions
+    should get a proportional confidence penalty."""
+
+    class PartialLLM:
+        def complete(self, messages: List[Dict[str, str]], **kw: Any) -> str:
+            return (
+                '{"a":"1. AttnRes uses depth-wise softmax attention. '
+                "2. Not covered in available facts. "
+                "3. Not covered in available facts."
+                '","f":["F1"]}'
+            )
+
+        @property
+        def model_name(self) -> str:
+            return "mock"
+
+    syn = AnswerSynthesizer(PartialLLM())
+    facts = [
+        {
+            "subject_id": "attnres",
+            "predicate": "uses",
+            "object_value": "depth-wise softmax attention",
+            "confidence": 0.9,
+        }
+    ]
+    query = "What does AttnRes use? Why is it better? How does it scale?"
+    result = syn.synthesize(query, facts, entity_names={"attnres": "AttnRes"})
+    # 2/3 sub-questions uncovered → penalty of ~0.33
+    assert result.confidence < 0.8
+
+
+def test_multi_question_full_coverage_not_penalized() -> None:
+    """Multi-question answers with no 'Not covered' should not get
+    the partial coverage penalty."""
+
+    class FullLLM:
+        def complete(self, messages: List[Dict[str, str]], **kw: Any) -> str:
+            return (
+                '{"a":"1. AttnRes uses depth-wise softmax attention. '
+                "2. It is better because it weights contributions. "
+                "3. It scales via Block AttnRes."
+                '","f":["F1","F2","F3"]}'
+            )
+
+        @property
+        def model_name(self) -> str:
+            return "mock"
+
+    syn = AnswerSynthesizer(FullLLM())
+    facts = [
+        {
+            "subject_id": "attnres",
+            "predicate": "uses",
+            "object_value": "depth-wise softmax attention",
+            "confidence": 0.9,
+        },
+        {
+            "subject_id": "attnres",
+            "predicate": "is better because",
+            "object_value": "it weights contributions",
+            "confidence": 0.9,
+        },
+        {
+            "subject_id": "blockattnres",
+            "predicate": "scales via",
+            "object_value": "Block AttnRes",
+            "confidence": 0.9,
+        },
+    ]
+    query = "What does AttnRes use? Why is it better? How does it scale?"
+    result = syn.synthesize(
+        query,
+        facts,
+        entity_names={"attnres": "AttnRes", "blockattnres": "BlockAttnRes"},
+    )
+    # No "Not covered" → no partial coverage penalty
+    assert result.confidence >= 0.7

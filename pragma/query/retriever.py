@@ -37,6 +37,12 @@ class BM25Retriever:
 
         all_entity_scores: Dict[str, float] = {}
 
+        # For multi-question queries, allow more seeds so each
+        # sub-question has a chance of finding its entities.
+        effective_max_seeds = self.max_total_seeds
+        if len(sub_questions) >= 3:
+            effective_max_seeds = max(self.max_total_seeds, len(sub_questions) * 2)
+
         for question in sub_questions:
             if not question or not question.strip():
                 continue
@@ -57,7 +63,7 @@ class BM25Retriever:
         )
 
         top_entities = []
-        for entity_id, score in sorted_entities[: self.max_total_seeds]:
+        for entity_id, score in sorted_entities[:effective_max_seeds]:
             entity = self._get_entity(entity_id)
             if entity:
                 top_entities.append(entity)

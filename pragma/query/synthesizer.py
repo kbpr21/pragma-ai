@@ -218,16 +218,19 @@ _PLAN_PROMPT = (
 
 _ANALOGY_PROMPT = (
     "You are drawing an analogy between a research concept and an "
-    "external domain, using ONLY the provided facts. Rules:\n"
+    "external domain, using the provided facts. Rules:\n"
     "\n"
-    "1. Ground every claim in a specific fact. If no fact supports "
-    "the analogy, say so — do NOT fabricate parallels.\n"
+    "1. Ground every claim in a specific fact. If no fact directly "
+    "supports the analogy, try to construct one from the factual "
+    "attributes: what the concept DOES, how it WORKS, what it "
+    "REPLACES. Then map those attributes to the target domain.\n"
     "\n"
     "2. Mark inferred analogies as [speculative]. Keep them brief.\n"
     "\n"
-    "3. If the facts do not contain enough information to draw a "
-    "meaningful analogy, output "
-    '{"a":"unknown","f":[],"reason":"facts insufficient for analogy"}.\n'
+    "3. Only output "
+    '{"a":"unknown","f":[],"reason":"..."} if the facts contain '
+    "ABSOLUTELY NO information about the source concept. If there "
+    "are ANY facts about the concept, use them to build the analogy.\n"
     "\n"
     "4. NEVER include fact IDs (F1, F2) in the answer text.\n"
     "\n"
@@ -240,12 +243,18 @@ _MULTI_QUESTION_PROMPT = (
     "1. Answer EVERY sub-question separately. Label each answer "
     "with the sub-question it addresses.\n"
     "\n"
-    "2. If the facts do not cover a sub-question, explicitly say "
-    "'Not covered in available facts' for that part.\n"
+    "2. Before saying 'Not covered in available facts' for a "
+    "sub-question, try to INFER the answer by combining multiple "
+    "facts. Chain across facts: if F1 says X does A and F2 says A "
+    "causes B, you may conclude X leads to B. Mark such inferences "
+    "as [inferred].\n"
     "\n"
-    "3. NEVER return a single fragment that only addresses one part.\n"
+    "3. Only say 'Not covered' if NO combination of facts provides "
+    "even a partial answer to that sub-question.\n"
     "\n"
-    "4. NEVER include fact IDs (F1, F2) in the answer text.\n"
+    "4. NEVER return a single fragment that only addresses one part.\n"
+    "\n"
+    "5. NEVER include fact IDs (F1, F2) in the answer text.\n"
     "\n"
     'Output one JSON object: {"a":"your multi-part answer","f":["F1","F2"]}.'
 )
@@ -1107,6 +1116,30 @@ class AnswerSynthesizer:
                     grounding_ratio * 100,
                     grounded,
                     len(answer_content_words),
+                )
+
+        # Multi-question partial coverage penalty: if the answer
+        # contains "Not covered" for some sub-questions, reduce
+        # confidence proportionally. E.g. 3/8 "Not covered" → 0.375
+        # penalty, so confidence drops from ~1.0 to ~0.6.
+        if query.count("?") >= 2:
+            # Count sub-questions from the query.
+            sub_q_count = query.count("?")
+            # Count "Not covered" occurrences in the answer.
+            not_covered_count = answer_lower.count("not covered")
+            if sub_q_count > 0 and not_covered_count > 0:
+                coverage_ratio = 1.0 - (not_covered_count / sub_q_count)
+                # Penalty = (1 - coverage_ratio) * 0.5
+                # So 50% uncovered → 0.25 penalty, 75% uncovered → 0.375
+                partial_penalty = (1.0 - coverage_ratio) * 0.5
+                penalty += partial_penalty
+                logger.debug(
+                    "confidence: multi-question coverage %.0f%% "
+                    "(%d/%d covered), penalty +%.2f",
+                    coverage_ratio * 100,
+                    sub_q_count - not_covered_count,
+                    sub_q_count,
+                    partial_penalty,
                 )
 
         return max(base - penalty, 0.0)

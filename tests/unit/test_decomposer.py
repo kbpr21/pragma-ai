@@ -103,3 +103,27 @@ class TestQueryDecomposerFallback:
         decomposer = QueryDecomposer(llm)
         result = decomposer._fallback_parse(llm.response)
         assert len(result) >= 1
+
+
+class TestLooksSimpleMultiQuestion:
+    """Multi-question queries must NOT be classified as simple."""
+
+    def test_multi_question_not_simple(self):
+        from pragma.query.decomposer import _looks_simple
+
+        q = "What is X? Why does Y happen? How does Z work?"
+        assert not _looks_simple(q)
+
+    def test_single_question_is_simple(self):
+        from pragma.query.decomposer import _looks_simple
+
+        q = "What is Apple?"
+        assert _looks_simple(q)
+
+    def test_decompose_multi_question_uses_llm(self):
+        """Multi-? queries must go through the LLM decomposition path."""
+        llm = MockLLM('["What is X?", "Why does Y happen?", "How does Z work?"]')
+        decomposer = QueryDecomposer(llm)
+        result = decomposer.decompose("What is X? Why does Y happen? How does Z work?")
+        # Should NOT return the original query as a single item.
+        assert len(result) == 3

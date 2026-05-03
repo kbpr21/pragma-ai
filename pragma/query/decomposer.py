@@ -31,6 +31,10 @@ _MULTI_HOP_HINTS = (
 
 def _looks_simple(query: str) -> bool:
     q = query.strip().lower()
+    # Multi-question queries are NEVER simple — they need decomposition
+    # so each sub-question gets its own BM25 retrieval pass.
+    if q.count("?") >= 2:
+        return False
     if len(q.split()) <= _SIMPLE_QUERY_MAX_WORDS and q.count("?") <= 1:
         if not any(hint in q for hint in _MULTI_HOP_HINTS):
             return True

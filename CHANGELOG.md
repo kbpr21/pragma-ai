@@ -4,6 +4,64 @@ All notable changes to **pragma** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] — 2026-05-03
+
+Retrieval and confidence accuracy release. Fixes the root cause of
+"Not covered in available facts" for questions the paper *does* answer.
+**No breaking API changes.**
+
+### Fixed
+
+* **Multi-question queries returned "Not covered" for answerable
+  sub-questions.** The decomposer's `_looks_simple` heuristic was
+  classifying multi-? queries as simple (because they were short
+  enough), so the entire query blob was sent to BM25 as one string.
+  BM25 matched only entities related to the first sub-question, so
+  facts for later sub-questions were never retrieved. Now: (1) queries
+  with 2+ question marks are never classified as simple, (2) the KB
+  pipeline splits multi-? queries into sub-questions for BM25
+  retrieval, and (3) the retriever scales `max_total_seeds` up for
+  multi-question queries so each sub-question gets its own seed
+  entities.
+
+* **Confidence 1.00 with 5/8 "Not covered" sub-questions.** The
+  confidence scorer didn't penalize partial coverage in multi-question
+  answers. Now it counts "Not covered" occurrences and applies a
+  proportional penalty: 50% uncovered → −0.25, 75% uncovered →
+  −0.375.
+
+* **Analogy queries gave up too easily.** The analogy prompt said "if
+  no fact supports the analogy, say so", which caused the LLM to
+  immediately output "Not covered" instead of trying to construct an
+  analogy from the concept's attributes. Now the prompt encourages
+  mapping factual attributes (what it does, how it works, what it
+  replaces) to the target domain before giving up.
+
+* **Multi-question prompt said "Not covered" too eagerly.** The old
+  prompt said "if the facts do not cover a sub-question, say Not
+  covered". Now it says "try to INFER the answer by combining
+  multiple facts" before saying "Not covered".
+
+### Added
+
+* **Multi-question partial coverage penalty** in `_compute_confidence`:
+  counts "Not covered" occurrences in the answer and penalizes
+  confidence proportionally.
+
+* **5 new tests** for decomposer multi-? handling, retriever seed
+  scaling, and multi-question confidence penalties.
+
+### Changed
+
+* `_looks_simple` in `decomposer.py`: queries with 2+ question marks
+  are never classified as simple.
+* `find_seed_entities` in `retriever.py`: `effective_max_seeds` scales
+  with `len(sub_questions) * 2` for 3+ sub-questions.
+* KB `query` pipeline: splits multi-? queries via `_split_questions`
+  when the decomposer returns `[query]`.
+* ANALOGY prompt: encourages constructing from factual attributes.
+* MULTI_QUESTION prompt: encourages inference before "Not covered".
+
 ## [1.0.5] — 2026-05-03
 
 Reasoning quality release. Adds task-type detection, specialised

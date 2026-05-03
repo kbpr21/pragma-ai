@@ -72,10 +72,19 @@ class TestBM25Retriever:
             builder.add_entity(Entity(f"e{i}", f"Entity{i}", "ORG", [], None))
             builder.search_results[f"Q{i}"] = [f"e{i}"]
 
+        # With 15 sub-questions, effective_max_seeds scales up to
+        # len(sub_questions) * 2 = 30, so all 15 entities can be
+        # returned. With only 2 sub-questions, the hard cap of 5
+        # applies.
         retriever = BM25Retriever(builder, max_total_seeds=5)
         result = retriever.find_seed_entities([f"Q{i}" for i in range(15)])
+        # 15 sub-questions → effective_max = max(5, 30) = 30
+        assert len(result) == 15
 
-        assert len(result) <= 5
+        # With only 2 sub-questions, the hard cap of 5 applies.
+        retriever2 = BM25Retriever(builder, max_total_seeds=5)
+        result2 = retriever2.find_seed_entities(["Q0", "Q1"])
+        assert len(result2) <= 5
 
     def test_no_entities_logs_warning(self, caplog):
         builder = MockGraphBuilder()

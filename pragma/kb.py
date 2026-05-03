@@ -421,6 +421,18 @@ class KnowledgeBase:
         synthesizer = AnswerSynthesizer(self._llm)
 
         sub_questions = decomposer.decompose(query)
+
+        # If the decomposer returned just the original query (simple
+        # path), but the query has multiple question marks, still
+        # split it for BM25 retrieval so each sub-question gets its
+        # own seed entity search. This is critical for multi-question
+        # queries where the decomposer's _looks_simple heuristic
+        # might have skipped decomposition.
+        if len(sub_questions) == 1 and query.count("?") >= 2:
+            from pragma.query.synthesizer import _split_questions
+
+            sub_questions = _split_questions(query)
+
         seed_entities = retriever.find_seed_entities(sub_questions)
 
         if not seed_entities:
