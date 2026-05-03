@@ -514,6 +514,7 @@ INTENTS: Sequence[Intent] = (
             "is compatible with",
             "is a replacement for",
         ),
+        object_filter=_is_anything,
     ),
 )
 
@@ -836,6 +837,9 @@ class MultiHopResolver:
             edge = self._follow_reverse(anchor_text, target)
             if edge is None:
                 return None
+            answer_val = str(edge.value)
+            if not self._is_valid_answer(answer_val, query, target):
+                return None
             chain = [f"{edge.value} <--{target.predicates[0]}-- {anchor_text}"]
             return ResolverHit(
                 answer=str(edge.value),
@@ -862,6 +866,23 @@ class MultiHopResolver:
         for anchor_id in anchor_ids:
             hit = self._walk(anchor_id, target, bridge, compound=is_compound)
             if hit is not None:
+                # Validate: reject fragment / non-responsive answers.
+                if not self._is_valid_answer(hit.answer, query, target):
+                    logger.debug(
+                        "resolver: rejecting fragment answer %r for query %r",
+                        hit.answer,
+                        query,
+                    )
+                    continue
+                # Downgrade confidence on shallow matches (answer is a
+                # bare fragment or very short).
+                if self._looks_like_fragment(hit.answer):
+                    hit = ResolverHit(
+                        answer=hit.answer,
+                        fact_ids=hit.fact_ids,
+                        bridge_chain=hit.bridge_chain,
+                        confidence=max(hit.confidence - 0.3, 0.1),
+                    )
                 return hit
         return None
 
@@ -1273,6 +1294,87 @@ class MultiHopResolver:
             return None
         scored.sort(key=lambda t: t[0], reverse=True)
         return scored[0][1]
+
+    # ------------------------------------------------------------------
+    # Answer validation
+    # ------------------------------------------------------------------
+
+    # Words that signal a fragment answer (predicate tail, not a noun
+    # phrase).  When the resolver's answer starts with one of these,
+    # the answer is likely a bare object_value that was truncated or
+    # absorbed into the predicate by the extractor.
+    _FRAGMENT_STARTERS: Set[str] = {
+        "with",
+        "by",
+        "from",
+        "of",
+        "and",
+        "or",
+        "than",
+        "over",
+        "through",
+        "via",
+        "using",
+        "that",
+    }
+
+    @classmethod
+    def _looks_like_fragment(cls, answer: str) -> bool:
+        """True if *answer* looks like a predicate tail, not a noun phrase.
+
+        A fragment:
+        - Starts with a preposition/conjunction ("with", "by", etc.)
+        - Is a single word that is not a proper noun
+        - Is empty
+
+        NOT a fragment:
+        - 2+ word answers that start with a capital letter (proper nouns)
+        - Numeric years ("2019")
+        - Place names ("Cambridge", "Austin, Texas")
+        """
+        if not answer:
+            return True
+        words = answer.split()
+        if len(words) == 1:
+            # Single word — could be a year, a name, etc.
+            # Not a fragment if it's capitalized or numeric.
+            w = words[0]
+            if w[0].isupper() or w[0].isdigit():
+                return False
+            return True
+        # Multi-word: fragment only if it starts with a preposition.
+        return words[0].lower() in cls._FRAGMENT_STARTERS
+
+    @classmethod
+    def _is_valid_answer(
+        cls,
+        answer: str,
+        query: str,
+        intent: Intent,
+    ) -> bool:
+        """Check whether *answer* is a valid, responsive answer to *query*.
+
+        Rejects:
+        - Empty / whitespace-only answers
+        - Fragment answers (start with a preposition)
+        - Answers that are just a re-statement of the predicate
+        - Answers that don't pass the intent's object_filter
+        """
+        if not answer or not answer.strip():
+            return False
+
+        # Fragment detection: answers starting with prepositions are
+        # almost always predicate tails, not real answers.
+        if cls._looks_like_fragment(answer):
+            return False
+
+        # For intents with object_filter, the answer must pass it.
+        # This catches cases where the extractor stored a sentence
+        # fragment as object_value.
+        if not intent.object_filter(answer):
+            return False
+
+        return True
 
     # ------------------------------------------------------------------
     # Diagnostics

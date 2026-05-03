@@ -336,6 +336,17 @@ class KnowledgeBase:
                 logger.debug("multi-hop resolver crashed (%s); falling through", e)
                 hit = None
             if hit is not None:
+                # If the resolver returned a low-confidence answer
+                # (e.g. downgraded because it looked like a fragment),
+                # fall through to the LLM path for a better synthesis.
+                if hit.confidence < 0.5:
+                    logger.debug(
+                        "resolver hit confidence %.2f < 0.5, falling through to LLM",
+                        hit.confidence,
+                    )
+                    hit = None
+
+            if hit is not None:
                 reasoning_path = [
                     ReasoningStep(
                         fact_id=fid or "",

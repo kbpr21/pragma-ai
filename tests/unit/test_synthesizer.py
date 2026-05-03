@@ -202,7 +202,7 @@ def test_direct_answer_skipped_when_multiple_candidates() -> None:
 
 
 def test_direct_answer_skipped_when_low_confidence() -> None:
-    llm = MockLLM('{"a":"via LLM","f":["F1"]}')
+    llm = MockLLM('{"a":"Steve Jobs founded the company","f":["F1"]}')
     syn = AnswerSynthesizer(llm)
     facts = [
         {
@@ -217,7 +217,7 @@ def test_direct_answer_skipped_when_low_confidence() -> None:
         facts,
         entity_names={"apple": "Apple Inc."},
     )
-    assert "LLM" in result.answer
+    assert "Steve Jobs" in result.answer
     assert len(llm.calls) == 1
 
 
@@ -407,3 +407,124 @@ def test_safety_rail_caps_runaway_facts() -> None:
     syn2 = AnswerSynthesizer(CountingLLM(), max_facts=3)
     syn2.synthesize("test predicate query", facts)
     assert seen_lines["n"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Fragment detection + F-id stripping
+# ---------------------------------------------------------------------------
+
+
+def test_fragment_answer_triggers_refinement() -> None:
+    """When the LLM returns a fragment (starts with 'with'), the
+    post-processor should detect it and retry with a refinement prompt."""
+
+    class TwoCallLLM:
+        def __init__(self) -> None:
+            self.calls: int = 0
+
+        def complete(self, messages: List[Dict[str, str]], **kw: Any) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return '{"a":"with learned softmax attention over depth","f":["F1"]}'
+            return "AttnRes uses learned softmax attention over the depth dimension"
+
+        @property
+        def model_name(self) -> str:
+            return "mock"
+
+    llm = TwoCallLLM()
+    syn = AnswerSynthesizer(llm)
+    facts = [
+        {
+            "subject_id": "attnres",
+            "predicate": "is a drop-in replacement for",
+            "object_value": "with learned softmax attention over depth",
+            "confidence": 0.9,
+        }
+    ]
+    result = syn.synthesize(
+        "What is the core idea behind AttnRes?",
+        facts,
+        entity_names={"attnres": "AttnRes"},
+    )
+    assert llm.calls == 2
+    assert "AttnRes" in result.answer or "attention" in result.answer.lower()
+
+
+def test_fid_artifacts_stripped_from_answer() -> None:
+    """F-id labels like (F1), [F2] should be removed from the answer."""
+
+    class FidLLM:
+        def complete(self, messages: List[Dict[str, str]], **kw: Any) -> str:
+            return '{"a":"AttnRes (F1) is a method [F2] that uses depth-wise attention","f":["F1","F2"]}'
+
+        @property
+        def model_name(self) -> str:
+            return "mock"
+
+    syn = AnswerSynthesizer(FidLLM())
+    facts = [
+        {
+            "subject_id": "attnres",
+            "predicate": "uses",
+            "object_value": "depth-wise attention",
+            "confidence": 0.8,
+        }
+    ]
+    result = syn.synthesize(
+        "What does AttnRes use?",
+        facts,
+        entity_names={"attnres": "AttnRes"},
+    )
+    assert "(F1)" not in result.answer
+    assert "[F2]" not in result.answer
+
+
+def test_confidence_penalized_for_fragment_answer() -> None:
+    """Fragment answers should get a confidence penalty."""
+
+    class FragLLM:
+        def complete(self, messages: List[Dict[str, str]], **kw: Any) -> str:
+            return '{"a":"by maintaining parallel streams","f":["F1"]}'
+
+        @property
+        def model_name(self) -> str:
+            return "mock"
+
+    syn = AnswerSynthesizer(FragLLM())
+    facts = [
+        {
+            "subject_id": "x",
+            "predicate": "does",
+            "object_value": "something",
+            "confidence": 0.9,
+        }
+    ]
+    result = syn.synthesize("What does X do?", facts, entity_names={"x": "X"})
+    # The fragment "by maintaining parallel streams" starts with "by",
+    # so confidence should be penalized.
+    assert result.confidence < 0.9
+
+
+def test_confidence_zero_for_unknown() -> None:
+    """'unknown' answers should get zero confidence."""
+
+    class UnkLLM:
+        def complete(self, messages: List[Dict[str, str]], **kw: Any) -> str:
+            return '{"a":"unknown","f":[]}'
+
+        @property
+        def model_name(self) -> str:
+            return "mock"
+
+    syn = AnswerSynthesizer(UnkLLM())
+    facts = [
+        {
+            "subject_id": "x",
+            "predicate": "does",
+            "object_value": "something",
+            "confidence": 0.9,
+        }
+    ]
+    result = syn.synthesize("What does X do?", facts, entity_names={"x": "X"})
+    assert result.confidence == 0.0

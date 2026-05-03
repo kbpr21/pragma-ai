@@ -37,14 +37,36 @@ logger = logging.getLogger(__name__)
 # mater). The revised prompt includes an explicit chaining example and
 # a rule that says "combine facts if no single fact answers".
 _BUILTIN_SYNTHESIS_PROMPT = (
-    "Answer briefly using ONLY these facts. "
-    "If no single fact answers, COMBINE multiple facts: e.g. if F1 says "
-    "'QubitForge --was founded by--> Sofia Petrova' and F2 says "
-    "'Sofia Petrova --studied at--> Cambridge', then for 'Where did the "
-    "founder of QubitForge study?' answer Cambridge using [F1,F2]. "
-    'Output one JSON object: {"a":"answer","f":["F1","F2"]} -- "f" is the '
-    "list of fact IDs you used. If none answer even after combining, set "
-    '"a":"unknown" and "f":[].'
+    "You are a precise reasoning engine. Answer the question using ONLY the "
+    "provided facts. Follow these rules strictly:\n"
+    "\n"
+    "1. SYNTHESIZE, do not paraphrase. Combine multiple facts when no single "
+    "fact answers the question. Chain across facts: if F1 links A to B and F2 "
+    "links B to C, you may conclude A→C.\n"
+    "\n"
+    "2. For questions asking about problems, methods, or results, structure "
+    "your answer as: problem → method → result. For 'what are the N issues' "
+    "questions, list ALL issues found in the facts, not just one.\n"
+    "\n"
+    "3. ANSWER COMPLETENESS: If the question asks about multiple things (e.g. "
+    "'what are the three issues'), your answer must address ALL of them. If "
+    "the facts only cover some, state what is covered and note gaps.\n"
+    "\n"
+    "4. NEVER return a bare fragment like 'with learned softmax attention' as "
+    "an answer. Every answer must be a complete, self-contained sentence or "
+    "phrase that makes sense without seeing the facts.\n"
+    "\n"
+    "5. NEVER include fact IDs (F1, F2, etc.) or labels in the answer text. "
+    "They go in the 'f' array only.\n"
+    "\n"
+    "6. If the facts are insufficient to answer even after combining, output "
+    '{"a":"unknown","f":[],"reason":"brief explanation of what is missing"}.\n'
+    "\n"
+    "7. Do NOT hallucinate information not present in the facts.\n"
+    "\n"
+    'Output one JSON object: {"a":"your answer","f":["F1","F2"]}. '
+    'The "f" array lists the fact IDs you used. The answer "a" must be '
+    "a complete, readable response — never a raw predicate fragment."
 )
 
 
@@ -413,11 +435,166 @@ class AnswerSynthesizer:
                 confidence=0.0,
             )
 
+        answer = result.get("answer", "")
+        reasoning_steps = result.get("reasoning_steps", [])
+
+        # Post-processing: clean and validate the answer.
+        answer = self._postprocess_answer(answer, query, capped_facts, names)
+
         return SynthesisOutput(
-            answer=result.get("answer", ""),
-            reasoning_steps=result.get("reasoning_steps", []),
-            confidence=self._compute_confidence(capped_facts),
+            answer=answer,
+            reasoning_steps=reasoning_steps,
+            confidence=self._compute_confidence(capped_facts, answer, query),
         )
+
+    # ------------------------------------------------------------------
+    # Answer post-processing
+    # ------------------------------------------------------------------
+
+    # Regex that matches F-id artifacts like (F1), [F1], F1, F12, etc.
+    _FID_RE = re.compile(r"\s*[\(\[]?F\d+[\)\]]?")
+
+    # Refinement prompt used when the initial answer is a fragment or
+    # otherwise underspecified.
+    _REFINEMENT_PROMPT = (
+        "The previous answer was a fragment or incomplete. "
+        "Given the question and facts below, write a COMPLETE, "
+        "self-contained answer that directly addresses the question. "
+        "Do not repeat the fragment — restructure it into a proper "
+        "sentence. Output plain text only, no JSON."
+    )
+
+    def _postprocess_answer(
+        self,
+        answer: str,
+        query: str,
+        facts: List[Dict[str, Any]],
+        entity_names: Dict[str, str],
+    ) -> str:
+        """Clean and validate the synthesized answer.
+
+        Steps:
+        1. Strip F-id artifacts (F1, (F2), [F3]) from the answer text.
+        2. Detect fragment answers (starts with lowercase preposition,
+           very short, or looks like a predicate tail).
+        3. If the answer is a fragment, retry with a refinement prompt.
+        4. Strip trailing punctuation artifacts.
+        """
+        if not answer or not answer.strip():
+            return answer
+
+        # Step 1: Strip F-id artifacts.
+        cleaned = self._FID_RE.sub("", answer).strip()
+
+        # Step 2: Detect fragment answers.
+        if self._is_fragment(cleaned, query):
+            logger.debug(
+                "synthesize: detected fragment answer, retrying with refinement"
+            )
+            refined = self._refine_answer(cleaned, query, facts, entity_names)
+            if refined and refined.strip():
+                return refined
+
+        # Step 3: Clean trailing artifacts (orphan commas, dashes).
+        cleaned = re.sub(r"[\s,;:]+$", "", cleaned)
+        return cleaned
+
+    @staticmethod
+    def _is_fragment(answer: str, query: str) -> bool:
+        """Heuristic to detect underspecified / fragment answers.
+
+        A fragment is an answer that:
+        - Starts with a lowercase preposition/conjunction ("with", "by",
+          "from", "of", "and", "or", "than", "over", "through", "via")
+        - Is very short (1-2 words) and does not contain any noun from
+          the query AND doesn't start with a capital letter (proper noun)
+        - Looks like a predicate tail rather than a noun phrase
+        """
+        if not answer:
+            return True
+        words = answer.split()
+
+        # Check for preposition/conjunction starters.
+        first = words[0].lower()
+        fragment_starters = {
+            "with",
+            "by",
+            "from",
+            "of",
+            "and",
+            "or",
+            "than",
+            "over",
+            "through",
+            "via",
+            "using",
+            "than",
+            "which",
+            "that",
+            "where",
+            "when",
+            "while",
+        }
+        if first in fragment_starters:
+            return True
+
+        # Very short answers (1-2 words) that don't start with a
+        # capital letter and don't contain query nouns are fragments.
+        if len(words) <= 2:
+            if words[0][0].isupper() or words[0][0].isdigit():
+                return False  # Proper noun or number — not a fragment
+            query_lower = query.lower()
+            answer_lower = answer.lower()
+            content_words = [w for w in answer_lower.split() if len(w) > 3]
+            if not any(w in query_lower for w in content_words):
+                return True
+
+        return False
+
+    def _refine_answer(
+        self,
+        fragment: str,
+        query: str,
+        facts: List[Dict[str, Any]],
+        entity_names: Dict[str, str],
+    ) -> Optional[str]:
+        """Retry with a refinement prompt when the answer is a fragment."""
+        facts_text = "\n".join(
+            self._format_fact(f, i + 1, entity_names)
+            for i, f in enumerate(facts[: self.max_facts])
+        )
+        user_prompt = (
+            f"Question: {query}\n"
+            f"Fragment answer: {fragment}\n"
+            f"Facts:\n{facts_text}\n\n"
+            f"{self._REFINEMENT_PROMPT}"
+        )
+        try:
+            response = self.llm.complete(
+                [
+                    {"role": "system", "content": self._REFINEMENT_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+                max_tokens=400,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+        if not response or not response.strip():
+            return None
+
+        # Strip any JSON/code fences the model might still produce.
+        text = self._strip_code_fences(response).strip()
+        # If the model returned JSON, try to extract the "a" field.
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and "a" in parsed:
+                return str(parsed["a"]).strip()
+        except json.JSONDecodeError:
+            pass
+        # Otherwise return the plain text, stripping F-id artifacts.
+        return self._FID_RE.sub("", text).strip()
 
     # ------------------------------------------------------------------
     # Response parsing
@@ -489,17 +666,77 @@ class AnswerSynthesizer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _compute_confidence(facts: List[Dict[str, Any]]) -> float:
-        """Confidence = mean(fact.confidence) + small recall bonus.
+    def _compute_confidence(
+        facts: List[Dict[str, Any]],
+        answer: str = "",
+        query: str = "",
+    ) -> float:
+        """Confidence = mean(fact.confidence) + recall bonus - penalties.
 
-        Replaces the previous two confidence helpers (``_calculate_confidence``
-        and ``_calculate_confidence_from_facts``); they did the same thing
-        with different inputs and were both partially broken when the fact
-        format changed.
+        Penalties applied:
+        - Fragment answer: answer starts with a preposition or is ≤2
+          words without query nouns → −0.3
+        - Very short answer (≤3 words): −0.15
+        - "unknown" answer: 0.0
+        - Low keyword overlap between answer and query: −0.1
+
+        The base confidence is the mean of the underlying fact
+        confidences plus a small recall bonus (capped at 0.2).
         """
         if not facts:
             return 0.0
+
+        # "unknown" answers get zero confidence.
+        if answer and answer.strip().lower() == "unknown":
+            return 0.0
+
         values = [float(f.get("confidence", 1.0)) for f in facts]
         avg = sum(values) / len(values)
         recall_bonus = min(len(values) * 0.02, 0.2)
-        return min(avg + recall_bonus, 1.0)
+        base = min(avg + recall_bonus, 1.0)
+
+        # No answer text to validate — return base.
+        if not answer or not query:
+            return base
+
+        penalty = 0.0
+
+        # Fragment penalty: answer starts with a preposition.
+        answer_words = answer.strip().split()
+        if answer_words:
+            first = answer_words[0].lower()
+            fragment_starters = {
+                "with",
+                "by",
+                "from",
+                "of",
+                "and",
+                "or",
+                "than",
+                "over",
+                "through",
+                "via",
+                "using",
+            }
+            if first in fragment_starters:
+                penalty += 0.3
+
+        # Very short answer penalty (but not for proper nouns).
+        if len(answer_words) <= 3:
+            if not (answer_words[0][0].isupper() or answer_words[0][0].isdigit()):
+                penalty += 0.15
+
+        # Low keyword overlap between answer and query.
+        answer_lower = answer.lower()
+        query_kw = [
+            w.lower()
+            for w in _WORD_RE.findall(query)
+            if len(w) > 2 and w.lower() not in _STOPWORDS
+        ]
+        if query_kw:
+            overlap = sum(1 for kw in query_kw if kw in answer_lower)
+            overlap_ratio = overlap / len(query_kw)
+            if overlap_ratio < 0.2:
+                penalty += 0.1
+
+        return max(base - penalty, 0.0)

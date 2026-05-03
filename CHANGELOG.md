@@ -4,6 +4,87 @@ All notable changes to **pragma** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] — 2026-05-03
+
+Answer quality release. Fixes the root cause of fragment and
+non-responsive answers from both the deterministic resolver and the
+LLM synthesizer. **No breaking API changes.**
+
+### Fixed
+
+* **Resolver returned fragment answers.** The deterministic
+  ``MultiHopResolver`` would return bare predicate tails like
+  ``"with learned softmax attention over depth"`` as answers to
+  questions like "What is the core idea behind AttnRes?". Now the
+  resolver validates every answer: fragments (answers starting with
+  a preposition) are rejected and the resolver falls through to the
+  LLM path for a proper synthesis.
+
+* **Resolver returned wrong answers for yes/no questions.** Questions
+  like "Is AttnRes a drop-in replacement for residual connections?"
+  were matched to the ``drop_in_replacement`` intent and returned the
+  object value of the first matching fact — which was a fragment
+  unrelated to the question. Now invalid answers are rejected.
+
+* **Synthesizer returned fragment answers.** The LLM synthesis prompt
+  was too terse (one line), causing the model to return predicate
+  fragments instead of complete sentences. The prompt has been
+  completely rewritten with explicit rules against fragments, F-id
+  artifacts, and incomplete answers.
+
+* **F-id artifacts in answers.** Answers sometimes contained raw
+  fact IDs like ``(F1)``, ``[F2]``, ``F3``. These are now stripped
+  from the answer text in post-processing.
+
+* **Confidence always 1.00.** The confidence scorer ignored answer
+  quality — even fragment and "unknown" answers got 1.0. Now:
+  "unknown" → 0.0, fragment answers → −0.3 penalty, very short
+  answers → −0.15 penalty, low query-answer overlap → −0.1 penalty.
+
+* **Resolver low-confidence answers bypassed.** When the resolver
+  returns a downgraded-confidence answer (fragment detected), the
+  KB pipeline now falls through to the LLM synthesizer for a better
+  answer instead of returning the fragment.
+
+### Added
+
+* **Answer post-processing pipeline** in ``AnswerSynthesizer``:
+  - ``_postprocess_answer`` — strips F-id artifacts, detects
+    fragments, retries with a refinement prompt
+  - ``_is_fragment`` — heuristic to detect underspecified answers
+    (starts with preposition, very short without query nouns)
+  - ``_refine_answer`` — retry with a refinement prompt when the
+    initial answer is a fragment
+  - ``_FID_RE`` — regex to strip ``(F1)``, ``[F2]``, ``F3`` artifacts
+
+* **Answer validation in ``MultiHopResolver``**:
+  - ``_is_valid_answer`` — rejects empty, fragment, and
+    object_filter-failing answers
+  - ``_looks_like_fragment`` — detects predicate tails (starts with
+    preposition, single lowercase word, etc.)
+  - ``_FRAGMENT_STARTERS`` — set of preposition/conjunction words
+
+* **Rewritten synthesis prompt** with 7 explicit rules:
+  1. Synthesize, do not paraphrase
+  2. Structure as problem→method→result for research questions
+  3. Answer completeness — address ALL parts of the question
+  4. Never return bare fragments
+  5. Never include F-id labels in answer text
+  6. Graceful "unknown" with reason when facts insufficient
+  7. No hallucination
+
+* **4 new tests** for fragment detection, F-id stripping,
+  confidence penalty, and unknown-answer zero confidence.
+
+### Changed
+
+* ``AnswerSynthesizer.synthesize`` now calls ``_postprocess_answer``
+  and passes ``answer`` + ``query`` to ``_compute_confidence``.
+* ``_compute_confidence`` accepts ``answer`` and ``query`` parameters
+  for quality-aware scoring.
+* Resolver confidence downgraded by −0.3 for fragment-like answers.
+* KB query pipeline falls through to LLM when resolver confidence < 0.5.
+
 ## [1.0.3] — 2026-05-02
 
 Ingestion + reasoning quality release. Fixes the root cause of empty
