@@ -4,6 +4,80 @@ All notable changes to **pragma** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] — 2026-05-03
+
+Reasoning quality release. Adds task-type detection, specialised
+synthesis prompts, hallucination detection, and truncation detection.
+**No breaking API changes.**
+
+### Fixed
+
+* **Multi-question queries returned single-fragment answers.** Queries
+  like "What parts discuss efficiency? Which sections talk about
+  scaling? Where is BlockAttnRes justified?" returned a single
+  fragment like "depth-wise softmax attention" that addressed none of
+  the three sub-questions. Now the system detects multi-question
+  queries, uses a specialised prompt that requires answering every
+  sub-question, and increases the token budget to 1000.
+
+* **Summary queries truncated mid-sentence.** "Summarize the paper in
+  3 sentences" returned an answer that was cut off mid-sentence with
+  no closing punctuation. Now the system detects truncation (incomplete
+  JSON, mid-word cutoff, mid-enumeration comma) and retries with 2x
+  token budget.
+
+* **Analogy queries hallucinated with confidence 1.00.** "Relate
+  AttnRes to database query optimization" produced a creative but
+  entirely ungrounded analogy (facts don't mention databases) with
+  confidence 1.00. Now: (1) analogy queries use a specialised prompt
+  that requires grounding every claim in a fact, and (2) the
+  confidence scorer checks answer-fact grounding — answers where less
+  than 30% of content words appear in the facts get a −0.3 penalty.
+
+* **Plan queries produced generic steps.** "Turn the core idea into a
+  10-step implementation plan" returned generic steps like "Define the
+  model depth" that could apply to any model. Now plan queries use a
+  specialised prompt that requires each step to be derived from the
+  facts, with inferred steps marked as `[inferred]`.
+
+### Added
+
+* **Task-type detection** (`_classify_task`): classifies queries as
+  FACTOID, SUMMARY, PLAN, ANALOGY, or MULTI_QUESTION using keyword
+  heuristics (no LLM call needed).
+
+* **Specialised synthesis prompts**: each task type gets its own prompt
+  with rules tailored to the reasoning task:
+  - FACTOID: the existing 7-rule prompt
+  - SUMMARY: problem→approach→result structure, no truncation
+  - PLAN: each step derived from facts, inferred steps marked
+  - ANALOGY: every claim grounded in a fact, speculative marks
+  - MULTI_QUESTION: answer every sub-question separately
+
+* **Truncation detection** (`_looks_truncated`): detects incomplete
+  JSON, mid-word cutoffs, and mid-enumeration commas. Triggers a
+  retry with 2x token budget.
+
+* **Hallucination detection** in `_compute_confidence`: checks what
+  fraction of the answer's content words appear in the fact texts.
+  Answers with less than 30% grounding get a −0.3 confidence penalty.
+
+* **Multi-question splitting** (`_split_questions`): splits queries
+  with multiple question marks into individual sub-questions.
+
+* **11 new tests** for task-type classification, question splitting,
+  truncation detection, hallucination detection, and grounded answers.
+
+### Changed
+
+* `synthesize` now classifies the task type before selecting a prompt.
+* Direct-answer fast-path only applies to FACTOID queries.
+* Multi-question queries keep more facts after filtering (minimum 5).
+* `max_tokens` increased to 900 for SUMMARY/PLAN, 1000 for
+  MULTI_QUESTION.
+* `_compute_confidence` now accepts `entity_names` parameter for
+  hallucination grounding checks.
+
 ## [1.0.4] — 2026-05-03
 
 Answer quality release. Fixes the root cause of fragment and

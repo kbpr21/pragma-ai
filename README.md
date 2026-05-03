@@ -8,7 +8,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-363%20passing-brightgreen)](#status)
+[![Tests](https://img.shields.io/badge/tests-374%20passing-brightgreen)](#status)
 
 [Quickstart](#quickstart) ·
 [Why](#why-pragma) ·
@@ -334,7 +334,7 @@ print(report.summary())
 
 ## Status
 
-* **363 tests** passing locally (Windows / Python 3.12)
+* **374 tests** passing locally (Windows / Python 3.12)
 * `ruff` clean, type-annotated (`py.typed` shipped)
 * Stable public API at v1.0 — see [CHANGELOG.md](CHANGELOG.md)
 

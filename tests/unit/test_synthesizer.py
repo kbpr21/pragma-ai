@@ -528,3 +528,161 @@ def test_confidence_zero_for_unknown() -> None:
     ]
     result = syn.synthesize("What does X do?", facts, entity_names={"x": "X"})
     assert result.confidence == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Task-type classification
+# ---------------------------------------------------------------------------
+
+
+def test_classify_factoid() -> None:
+    from pragma.query.synthesizer import _classify_task, TaskType
+
+    assert _classify_task("Who founded Apple?") == TaskType.FACTOID
+    assert _classify_task("What is the capital of France?") == TaskType.FACTOID
+
+
+def test_classify_summary() -> None:
+    from pragma.query.synthesizer import _classify_task, TaskType
+
+    assert _classify_task("Summarize the paper in 3 sentences") == TaskType.SUMMARY
+    assert _classify_task("Give an overview of the method") == TaskType.SUMMARY
+
+
+def test_classify_plan() -> None:
+    from pragma.query.synthesizer import _classify_task, TaskType
+
+    assert (
+        _classify_task("Turn the core idea into a 10-step implementation plan")
+        == TaskType.PLAN
+    )
+    assert _classify_task("Step-by-step roadmap for deployment") == TaskType.PLAN
+
+
+def test_classify_analogy() -> None:
+    from pragma.query.synthesizer import _classify_task, TaskType
+
+    assert (
+        _classify_task("Relate AttnRes to database query optimization")
+        == TaskType.ANALOGY
+    )
+    assert (
+        _classify_task("Draw an analogy between transformers and RNNs")
+        == TaskType.ANALOGY
+    )
+
+
+def test_classify_multi_question() -> None:
+    from pragma.query.synthesizer import _classify_task, TaskType
+
+    q = "What parts discuss efficiency? Which sections talk about scaling? Where is BlockAttnRes justified?"
+    assert _classify_task(q) == TaskType.MULTI_QUESTION
+
+
+# ---------------------------------------------------------------------------
+# Multi-question splitting
+# ---------------------------------------------------------------------------
+
+
+def test_split_questions() -> None:
+    from pragma.query.synthesizer import _split_questions
+
+    q = "What parts discuss efficiency? Which sections talk about scaling? Where is BlockAttnRes justified?"
+    parts = _split_questions(q)
+    assert len(parts) == 3
+    assert all(p.endswith("?") for p in parts)
+
+
+# ---------------------------------------------------------------------------
+# Truncation detection
+# ---------------------------------------------------------------------------
+
+
+def test_truncation_detected_incomplete_json() -> None:
+    from pragma.query.synthesizer import AnswerSynthesizer
+
+    assert AnswerSynthesizer._looks_truncated('{"a":"The paper introduces mHC')
+
+
+def test_truncation_detected_mid_word() -> None:
+    from pragma.query.synthesizer import AnswerSynthesizer
+
+    assert AnswerSynthesizer._looks_truncated(
+        '{"a":"The paper introduces mHC-lite, a streamlined variant of the '
+        "Manifold-Constrained Hyper-Connection framework that replaces the "
+        'standard 20-iteration Sinkhorn-Knop","f":["F1"]}'
+    )
+
+
+def test_truncation_not_detected_for_complete_answer() -> None:
+    from pragma.query.synthesizer import AnswerSynthesizer
+
+    assert not AnswerSynthesizer._looks_truncated(
+        '{"a":"Steve Jobs founded the company","f":["F1"]}'
+    )
+    assert not AnswerSynthesizer._looks_truncated(
+        '{"a":"The answer is 42.","f":["F1"]}'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hallucination detection (via confidence scoring)
+# ---------------------------------------------------------------------------
+
+
+def test_hallucination_penalized_in_confidence() -> None:
+    """Answers with content words not grounded in facts should get
+    a confidence penalty."""
+
+    class HallucLLM:
+        def complete(self, messages: List[Dict[str, str]], **kw: Any) -> str:
+            return '{"a":"The method uses database indexing and query optimization to speed up retrieval","f":["F1"]}'
+
+        @property
+        def model_name(self) -> str:
+            return "mock"
+
+    syn = AnswerSynthesizer(HallucLLM())
+    # Use low-confidence facts so the direct-answer fast-path is skipped.
+    facts = [
+        {
+            "subject_id": "attnres",
+            "predicate": "uses",
+            "object_value": "depth-wise softmax attention",
+            "confidence": 0.5,
+        }
+    ]
+    result = syn.synthesize(
+        "What does AttnRes use?",
+        facts,
+        entity_names={"attnres": "AttnRes"},
+    )
+    assert result.confidence < 0.9
+
+
+def test_grounded_answer_not_penalized() -> None:
+    """Answers grounded in facts should NOT get a hallucination penalty."""
+
+    class GroundedLLM:
+        def complete(self, messages: List[Dict[str, str]], **kw: Any) -> str:
+            return '{"a":"AttnRes uses depth-wise softmax attention over the layer dimension","f":["F1"]}'
+
+        @property
+        def model_name(self) -> str:
+            return "mock"
+
+    syn = AnswerSynthesizer(GroundedLLM())
+    facts = [
+        {
+            "subject_id": "attnres",
+            "predicate": "uses",
+            "object_value": "depth-wise softmax attention",
+            "confidence": 0.9,
+        }
+    ]
+    result = syn.synthesize(
+        "What does AttnRes use?",
+        facts,
+        entity_names={"attnres": "AttnRes"},
+    )
+    assert result.confidence >= 0.7

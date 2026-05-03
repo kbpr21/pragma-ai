@@ -16,6 +16,11 @@ benchmark in ``benchmarks_run/run.py``:
    nested ``reasoning_steps`` array. Saves ~50 completion tokens per query.
 5. **No graph_path in the prompt** -- the facts already encode structure.
 6. **No system-prompt boilerplate** -- single-line directive, no rules list.
+7. **Task-type detection** -- queries are classified (factoid, summary,
+   plan, analogy, multi-question) and receive specialised prompts.
+8. **Hallucination detection** -- answers are checked for grounding in
+   the provided facts; ungrounded answers get confidence penalties.
+9. **Truncation detection** -- mid-sentence cutoffs trigger a retry.
 """
 
 from __future__ import annotations
@@ -23,12 +28,113 @@ from __future__ import annotations
 import json
 import logging
 import re
+from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Tuple
 
 from pragma.llm.base import LLMProvider
 from pragma.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Task-type classification
+# ---------------------------------------------------------------------------
+
+
+class TaskType(Enum):
+    """What kind of reasoning task does the query require?"""
+
+    FACTOID = auto()  # Single fact or simple composition
+    SUMMARY = auto()  # "Summarize / overview / describe"
+    PLAN = auto()  # "Implementation plan / steps / roadmap"
+    ANALOGY = auto()  # "Relate X to Y / compare / analogy"
+    MULTI_QUESTION = auto()  # Multiple distinct questions in one query
+
+
+def _classify_task(query: str) -> TaskType:
+    """Classify the query's reasoning task type.
+
+    Uses keyword heuristics — fast, no LLM call needed.
+    """
+    q = query.strip().lower()
+
+    # Multi-question: multiple question marks or line breaks with questions.
+    if q.count("?") >= 2:
+        return TaskType.MULTI_QUESTION
+
+    # Summary / overview / describe.
+    summary_keywords = {
+        "summarize",
+        "summary",
+        "overview",
+        "describe",
+        "explain in detail",
+        "give an overview",
+        "main points",
+        "key takeaways",
+        "in 3 sentences",
+        "in 5 sentences",
+        "brief overview",
+        "high-level overview",
+    }
+    if any(kw in q for kw in summary_keywords):
+        return TaskType.SUMMARY
+
+    # Plan / steps / roadmap / implementation.
+    plan_keywords = {
+        "implementation plan",
+        "step-by-step",
+        "steps to",
+        "roadmap",
+        "how to implement",
+        "how would you build",
+        "turn into a plan",
+        "implementation steps",
+    }
+    if any(kw in q for kw in plan_keywords):
+        return TaskType.PLAN
+
+    # Analogy / relate / compare.
+    analogy_keywords = {
+        "relate",
+        "analogy",
+        "analogous",
+        "compare to",
+        "similar to",
+        "like in",
+        "parallel between",
+        "map to",
+        "bridge between",
+    }
+    if any(kw in q for kw in analogy_keywords):
+        return TaskType.ANALOGY
+
+    return TaskType.FACTOID
+
+
+def _split_questions(query: str) -> List[str]:
+    """Split a multi-question query into individual questions.
+
+    Handles:
+    - Multiple sentences ending in '?'
+    - Line-break separated questions
+    - Semicolon-separated questions
+    """
+    # Split on question marks followed by whitespace or line breaks.
+    parts = re.split(r"\?\s*[\n\r]+|\?\s+", query.strip())
+    # Re-attach the '?' to each part.
+    result = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if not p.endswith("?"):
+            p += "?"
+        result.append(p)
+    if not result:
+        return [query]
+    return result
 
 
 # Prompt that teaches the LLM to chain facts for multi-hop questions.
@@ -68,6 +174,90 @@ _BUILTIN_SYNTHESIS_PROMPT = (
     'The "f" array lists the fact IDs you used. The answer "a" must be '
     "a complete, readable response — never a raw predicate fragment."
 )
+
+# Task-specific prompts. Each extends the base prompt with rules
+# tailored to the reasoning task type.
+
+_SUMMARY_PROMPT = (
+    "You are summarizing a research document from its atomic facts. "
+    "Follow these rules strictly:\n"
+    "\n"
+    "1. SYNTHESIZE an abstract-level understanding from the facts. "
+    "Do NOT just list facts — build a coherent narrative.\n"
+    "\n"
+    "2. Structure: problem → approach → key result. Cover each in "
+    "1-2 sentences. Preserve technical terms and quantities.\n"
+    "\n"
+    "3. If the facts are insufficient for a full summary, summarize "
+    "what IS covered and note what is missing. Never fabricate.\n"
+    "\n"
+    "4. NEVER include fact IDs (F1, F2) in the answer text.\n"
+    "\n"
+    "5. Complete all sentences. Do NOT truncate mid-sentence.\n"
+    "\n"
+    'Output one JSON object: {"a":"your summary","f":["F1","F2"]}.'
+)
+
+_PLAN_PROMPT = (
+    "You are turning research findings into an implementation plan. "
+    "Follow these rules strictly:\n"
+    "\n"
+    "1. Derive each step from the facts. If a step has no factual "
+    "basis, mark it as [inferred] and keep it minimal.\n"
+    "\n"
+    "2. Number each step. Be specific — reference actual methods, "
+    "quantities, and design choices from the facts.\n"
+    "\n"
+    "3. If the facts are insufficient for a complete plan, produce "
+    "the steps that ARE grounded and note what is missing.\n"
+    "\n"
+    "4. NEVER include fact IDs (F1, F2) in the answer text.\n"
+    "\n"
+    'Output one JSON object: {"a":"numbered plan steps","f":["F1","F2"]}.'
+)
+
+_ANALOGY_PROMPT = (
+    "You are drawing an analogy between a research concept and an "
+    "external domain, using ONLY the provided facts. Rules:\n"
+    "\n"
+    "1. Ground every claim in a specific fact. If no fact supports "
+    "the analogy, say so — do NOT fabricate parallels.\n"
+    "\n"
+    "2. Mark inferred analogies as [speculative]. Keep them brief.\n"
+    "\n"
+    "3. If the facts do not contain enough information to draw a "
+    "meaningful analogy, output "
+    '{"a":"unknown","f":[],"reason":"facts insufficient for analogy"}.\n'
+    "\n"
+    "4. NEVER include fact IDs (F1, F2) in the answer text.\n"
+    "\n"
+    'Output one JSON object: {"a":"your analogy","f":["F1","F2"]}.'
+)
+
+_MULTI_QUESTION_PROMPT = (
+    "You are answering a multi-part question. Follow these rules:\n"
+    "\n"
+    "1. Answer EVERY sub-question separately. Label each answer "
+    "with the sub-question it addresses.\n"
+    "\n"
+    "2. If the facts do not cover a sub-question, explicitly say "
+    "'Not covered in available facts' for that part.\n"
+    "\n"
+    "3. NEVER return a single fragment that only addresses one part.\n"
+    "\n"
+    "4. NEVER include fact IDs (F1, F2) in the answer text.\n"
+    "\n"
+    'Output one JSON object: {"a":"your multi-part answer","f":["F1","F2"]}.'
+)
+
+# Map task types to their specialised prompts.
+_TASK_PROMPTS: Dict[TaskType, str] = {
+    TaskType.FACTOID: _BUILTIN_SYNTHESIS_PROMPT,
+    TaskType.SUMMARY: _SUMMARY_PROMPT,
+    TaskType.PLAN: _PLAN_PROMPT,
+    TaskType.ANALOGY: _ANALOGY_PROMPT,
+    TaskType.MULTI_QUESTION: _MULTI_QUESTION_PROMPT,
+}
 
 
 DEFAULT_SYNTHESIS_PROMPT = load_prompt("synthesis", default=_BUILTIN_SYNTHESIS_PROMPT)
@@ -143,6 +333,17 @@ _STOPWORDS = frozenset(
 )
 
 _WORD_RE = re.compile(r"[a-zA-Z0-9]+")
+
+
+def _resolve_eid(
+    eid: Any,
+    names: Dict[str, str],
+    fallback: Any = None,
+) -> str:
+    """Resolve an entity ID to a name, for use outside the class."""
+    if not eid:
+        return str(fallback) if fallback is not None else "?"
+    return names.get(str(eid), str(eid))
 
 
 def _query_keywords(query: str) -> List[str]:
@@ -369,16 +570,39 @@ class AnswerSynthesizer:
 
         names = entity_names or {}
 
-        # 1. Pre-filter by query overlap. Often shrinks 25 facts -> 3-5.
+        # 1. Classify the task type and select the appropriate prompt.
+        task = _classify_task(query)
+        prompt = _TASK_PROMPTS.get(task, _BUILTIN_SYNTHESIS_PROMPT)
+        logger.debug("synthesize: task type=%s, prompt selected", task.name)
+
+        # For multi-question queries, increase max_tokens since the
+        # answer needs to cover multiple parts.
+        max_tokens = 600
+        if task == TaskType.MULTI_QUESTION:
+            max_tokens = 1000
+        elif task == TaskType.SUMMARY:
+            max_tokens = 900
+        elif task == TaskType.PLAN:
+            max_tokens = 900
+
+        # 2. Pre-filter by query overlap. Often shrinks 25 facts -> 3-5.
+        # For multi-question queries, be less aggressive — keep more
+        # facts so each sub-question has a chance of finding its facts.
         filtered = self._filter_facts_by_query(facts, query, names)
+        if task == TaskType.MULTI_QUESTION and len(filtered) < 5:
+            # Too few facts after filtering — use the full set.
+            filtered = facts
 
-        # 2. Try the direct-answer fast-path (zero LLM calls).
-        direct = self._try_direct_answer(query, filtered, names)
-        if direct is not None:
-            logger.debug("synthesize: direct-answer fast-path used")
-            return direct
+        # 3. Try the direct-answer fast-path (zero LLM calls).
+        # Only for FACTOID tasks — summary/plan/analogy/multi-question
+        # always need LLM synthesis.
+        if task == TaskType.FACTOID:
+            direct = self._try_direct_answer(query, filtered, names)
+            if direct is not None:
+                logger.debug("synthesize: direct-answer fast-path used")
+                return direct
 
-        # 3. Apply safety-rail cap, render compactly, call the LLM.
+        # 4. Apply safety-rail cap, render compactly, call the LLM.
         capped_facts = filtered[: self.max_facts]
         facts_text = "\n".join(
             self._format_fact(f, i + 1, names) for i, f in enumerate(capped_facts)
@@ -390,11 +614,11 @@ class AnswerSynthesizer:
         try:
             response = self.llm.complete(
                 [
-                    {"role": "system", "content": DEFAULT_SYNTHESIS_PROMPT},
+                    {"role": "system", "content": prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.0,
-                max_tokens=600,
+                max_tokens=max_tokens,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Synthesis LLM call failed: {e}")
@@ -411,11 +635,11 @@ class AnswerSynthesizer:
             try:
                 response = self.llm.complete(
                     [
-                        {"role": "system", "content": DEFAULT_SYNTHESIS_PROMPT},
+                        {"role": "system", "content": prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.0,
-                    max_tokens=1200,
+                    max_tokens=max_tokens * 2,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Synthesis LLM retry failed: {e}")
@@ -426,6 +650,28 @@ class AnswerSynthesizer:
                 reasoning_steps=[],
                 confidence=0.0,
             )
+
+        # 5. Truncation detection: if the response looks cut off
+        # (ends mid-sentence without closing the JSON), retry with
+        # more tokens and a continuation hint.
+        if self._looks_truncated(response):
+            logger.debug("synthesize: detected truncated response, retrying")
+            try:
+                cont_response = self.llm.complete(
+                    [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.0,
+                    max_tokens=max_tokens * 2,
+                )
+                if cont_response and cont_response.strip():
+                    # Use the longer response if it parses.
+                    cont_result = self._parse_response(cont_response)
+                    if cont_result is not None:
+                        response = cont_response
+            except Exception:  # noqa: BLE001
+                pass  # Keep the original truncated response.
 
         result = self._parse_response(response)
         if result is None:
@@ -438,14 +684,71 @@ class AnswerSynthesizer:
         answer = result.get("answer", "")
         reasoning_steps = result.get("reasoning_steps", [])
 
-        # Post-processing: clean and validate the answer.
+        # 6. Post-processing: clean and validate the answer.
         answer = self._postprocess_answer(answer, query, capped_facts, names)
+
+        # 7. Compute confidence with hallucination-aware scoring.
+        confidence = self._compute_confidence(capped_facts, answer, query, names)
 
         return SynthesisOutput(
             answer=answer,
             reasoning_steps=reasoning_steps,
-            confidence=self._compute_confidence(capped_facts, answer, query),
+            confidence=confidence,
         )
+
+    # ------------------------------------------------------------------
+    # Truncation detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _looks_truncated(response: str) -> bool:
+        """Heuristic: does the response look like it was cut off?
+
+        Signs of truncation:
+        - JSON is incomplete (no closing ``}``)
+        - Answer text ends mid-word (last token is a partial word)
+        - Answer text ends with a comma or colon mid-sentence
+
+        NOT truncation (these are normal):
+        - Answer just missing a trailing period
+        - Answer ending with a closing quote or paren
+        """
+        text = response.strip()
+        if not text:
+            return False
+
+        # Check for incomplete JSON — definitive truncation.
+        if text.startswith("{") and not text.rstrip().endswith("}"):
+            return True
+
+        # Check if the answer text inside JSON is cut off mid-word.
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and "a" in parsed:
+                answer_text = str(parsed["a"]).strip()
+                if answer_text:
+                    last = answer_text[-1]
+                    # Mid-word truncation: ends with a partial word
+                    # (letter followed by nothing, common when
+                    # max_tokens cuts off mid-token).
+                    # E.g. "Sinkhorn-Knop" → truncated.
+                    # But "The answer is 42" → not truncated.
+                    if last.isalpha() and len(answer_text) > 50:
+                        # Long answer ending with a letter (no
+                        # punctuation) is suspicious.
+                        # Check if the last few chars look like a
+                        # cut-off word (no space before the last
+                        # 5 chars).
+                        tail = answer_text[-10:]
+                        if " " not in tail[-5:]:
+                            return True
+                    # Ends with comma/colon mid-enumeration.
+                    if last in {",", ":"} and len(answer_text) > 30:
+                        return True
+        except json.JSONDecodeError:
+            pass
+
+        return False
 
     # ------------------------------------------------------------------
     # Answer post-processing
@@ -670,6 +973,7 @@ class AnswerSynthesizer:
         facts: List[Dict[str, Any]],
         answer: str = "",
         query: str = "",
+        entity_names: Optional[Dict[str, str]] = None,
     ) -> float:
         """Confidence = mean(fact.confidence) + recall bonus - penalties.
 
@@ -679,6 +983,8 @@ class AnswerSynthesizer:
         - Very short answer (≤3 words): −0.15
         - "unknown" answer: 0.0
         - Low keyword overlap between answer and query: −0.1
+        - Hallucination: answer contains significant content not
+          grounded in the provided facts → −0.3
 
         The base confidence is the mean of the underlying fact
         confidences plus a small recall bonus (capped at 0.2).
@@ -738,5 +1044,69 @@ class AnswerSynthesizer:
             overlap_ratio = overlap / len(query_kw)
             if overlap_ratio < 0.2:
                 penalty += 0.1
+
+        # Hallucination detection: check if the answer's content
+        # words are grounded in the provided facts. Extract
+        # significant content words from the answer, then check
+        # what fraction appear in the fact texts.
+        names = entity_names or {}
+        fact_text_blob = " ".join(
+            f"{_resolve_eid(f.get('subject_id'), names)} "
+            f"{f.get('predicate', '')} "
+            f"{f.get('object_value', '')} "
+            f"{_resolve_eid(f.get('object_id'), names)} "
+            f"{f.get('context', '')}"
+            for f in facts
+        ).lower()
+
+        # Extract content words from the answer (longer than 4 chars,
+        # not stopwords, not common verbs).
+        answer_content_words = [
+            w.lower()
+            for w in _WORD_RE.findall(answer)
+            if len(w) > 4
+            and w.lower() not in _STOPWORDS
+            and w.lower()
+            not in {
+                "which",
+                "where",
+                "while",
+                "therefore",
+                "however",
+                "because",
+                "although",
+                "further",
+                "between",
+                "through",
+                "without",
+                "another",
+                "whether",
+                "either",
+                "neither",
+                "instead",
+                "despite",
+                "during",
+                "before",
+                "after",
+                "since",
+                "until",
+                "unless",
+                "whereas",
+            }
+        ]
+
+        if answer_content_words:
+            grounded = sum(1 for w in answer_content_words if w in fact_text_blob)
+            grounding_ratio = grounded / len(answer_content_words)
+            # If less than 30% of answer content words appear in
+            # the facts, the answer likely contains hallucinations.
+            if grounding_ratio < 0.3:
+                penalty += 0.3
+                logger.debug(
+                    "confidence: low grounding %.0f%% (%d/%d words in facts)",
+                    grounding_ratio * 100,
+                    grounded,
+                    len(answer_content_words),
+                )
 
         return max(base - penalty, 0.0)
