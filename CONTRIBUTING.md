@@ -228,9 +228,8 @@ A PR is mergeable when, locally:
 * `python -m build && twine check dist/*` succeeds;
 * mypy doesn't introduce new errors (existing baseline is allowed).
 
-> Automated CI is intentionally not configured at this stage — the project
-> ships hand-verified releases. Adding a green-on-PR workflow is on the
-> roadmap; contributions welcome.
+> **CI runs on every push and PR to `main`** — the matrix covers Python
+> 3.9–3.12 on both Ubuntu and Windows. A green CI is required before merge.
 
 ## Reporting bugs
 

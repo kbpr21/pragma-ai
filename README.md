@@ -6,9 +6,9 @@
 **Atomic-fact reasoning over a knowledge graph. A RAG alternative that needs no vector database.**
 
 [![PyPI version](https://img.shields.io/pypi/v/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
+[![CI](https://github.com/kbpr21/pragma-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/kbpr21/pragma-ai/actions/workflows/ci.yml)
 [![Python versions](https://img.shields.io/pypi/pyversions/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-379%20passing-brightgreen)](#status)
 
 [Quickstart](#quickstart) ·
 [Why](#why-pragma) ·
@@ -334,7 +334,8 @@ print(report.summary())
 
 ## Status
 
-* **379 tests** passing locally (Windows / Python 3.12)
+* **379 tests** passing across Python 3.9–3.12 (Ubuntu + Windows)
+* CI on every push and PR — [see workflow](https://github.com/kbpr21/pragma-ai/actions/workflows/ci.yml)
 * `ruff` clean, type-annotated (`py.typed` shipped)
 * Stable public API at v1.0 — see [CHANGELOG.md](CHANGELOG.md)
 

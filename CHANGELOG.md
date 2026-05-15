@@ -4,6 +4,32 @@ All notable changes to **pragma** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] — 2026-05-15
+
+Production-readiness release. Adds CI, upgrades project maturity
+classification, and hardens documentation for open-source contribution.
+**No breaking API changes.**
+
+### Added
+
+* **GitHub Actions CI workflow** (`.github/workflows/ci.yml`) — runs
+  the full test suite and ruff lint on every push and PR to `main`.
+  Matrix covers Python 3.9–3.12 on Ubuntu and Windows. Build
+  validation (sdist + wheel + twine check) runs after tests pass.
+* **CI status badge** in README — live green/red from GitHub Actions.
+
+### Changed
+
+* **Development status upgraded** from `4 - Beta` to
+  `5 - Production/Stable` in PyPI classifiers. The public API has been
+  stable since 1.0.0 with no breaking changes across 7 releases and
+  379 passing tests across 4 Python versions.
+* **CONTRIBUTING.md** — removed "no CI" caveat; now documents the CI
+  matrix and that green CI is required before merge.
+* **README.md** — replaced static test-count badge with live CI badge;
+  updated status section to reference CI pipeline and cross-platform
+  test matrix.
+
 ## [1.0.6] — 2026-05-03
 
 Retrieval and confidence accuracy release. Fixes the root cause of

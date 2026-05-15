@@ -4,10 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pragma-ai"
-# 1.0.2 adds the `pragma connect` interactive setup wizard,
-# auto-discovery of available models per provider, and persistent user
-# config at ~/.pragma/config.json. No breaking API changes.
-version = "1.0.6"
+# 1.0.7 — production release: CI pipeline, documentation overhaul,
+# codebase audit. No breaking API changes from 1.0.x.
+version = "1.0.7"
 description = "Atomic-fact reasoning over a knowledge graph. A RAG alternative that needs no vector database."
 readme = "README.md"
 license = {text = "MIT"}
@@ -27,7 +26,7 @@ keywords = [
     "networkx",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
