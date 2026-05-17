@@ -9,30 +9,71 @@ from pragma.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
-_BUILTIN_FACT_PROMPT = """You are an atomic fact extractor. Your job is to decompose text into the smallest possible self-contained propositions.
+_BUILTIN_FACT_PROMPT = """You are an industrial-grade atomic fact extractor. Your job is to decompose text into the smallest possible self-contained propositions while PRESERVING SEMANTIC NUANCE.
 
-Rules:
+CORE RULES:
 1. Each fact must be independently verifiable without reading other facts.
 2. Resolve all pronouns to their referents.
 3. Extract numbers and dates exactly as they appear.
-4. Assign confidence: 1.0 = explicitly stated, 0.8 = strongly implied, 0.6 = inferred.
-5. Preserve negation: "X does NOT cause Y" is a valid fact.
-6. Do NOT infer facts not in the text.
+4. Preserve negation: "X does NOT cause Y" is a valid fact.
+5. Do NOT infer facts not in the text.
 
-CRITICAL field discipline -- this is what makes facts queryable:
-7. The "predicate" is a SHORT verb phrase (1-5 words), e.g. "founded",
+FIELD DISCIPLINE (makes facts queryable):
+6. The "predicate" is a SHORT verb phrase (1-5 words), e.g. "founded",
    "is CEO of", "reached market cap of", "was born on". It MUST NOT
    contain values, numbers, dates, money amounts, or named entities.
-8. Concrete values (numbers, dates, money like "$1 trillion", places,
-   percentages, durations) belong in "object_value" -- NEVER in the
+7. Concrete values (numbers, dates, money like "$1 trillion", places,
+   percentages, durations) belong in "object_value" — NEVER in the
    predicate. If the value is itself an entity, put its name in "object".
-9. WRONG: predicate="reached a market capitalization of $1 trillion",
-   object=null. RIGHT: predicate="reached market cap of",
-   object_value="$1 trillion in August 2018".
-10. WRONG: predicate="was founded on April 1, 1976".
-    RIGHT: predicate="was founded on", object_value="April 1, 1976".
-11. Always populate "context" with the full original sentence so
-    downstream consumers can recover phrasing if a slot was malformed.
+8. WRONG: predicate="reached a market capitalization of $1 trillion".
+   RIGHT: predicate="reached market cap of", object_value="$1 trillion in August 2018".
+9. Always populate "context" with the full original sentence.
+
+SEMANTIC NUANCE PRESERVATION (critical for reasoning quality):
+10. "modality" classifies the epistemic status of the claim:
+    - "assertion": definitive statement of fact ("X is Y", "X does Y")
+    - "hypothesis": speculative or uncertain ("X may Y", "X appears to Y", "X suggests Y")
+    - "negation": explicit denial ("X does NOT Y", "X is not Y")
+    - "conditional": depends on conditions ("If X then Y", "X under Z conditions")
+    - "comparative": relative claim ("X outperforms Y", "X is better than Y")
+11. "is_speculative": set to true when the text uses hedging language
+    (e.g. "appears to", "may", "might", "suggests", "could", "seems",
+    "it is possible that", "under certain conditions", "arguably").
+12. "hedge_phrase": when is_speculative is true, copy the EXACT hedging
+    phrase from the source text (e.g. "appears to", "under scaling-law
+    conditions"). Leave null for assertions.
+13. Confidence tiers:
+    - 1.0 = explicitly and definitively stated
+    - 0.85 = strongly implied with clear evidence
+    - 0.7 = inferred from context
+    - 0.55 = speculative, hedged, or uncertain language
+
+EXAMPLES:
+Input: "AttnRes appears to mitigate PreNorm dilution under scaling-law conditions."
+Output: {
+  "subject": "AttnRes",
+  "predicate": "mitigates",
+  "object": "PreNorm dilution",
+  "object_value": null,
+  "context": "AttnRes appears to mitigate PreNorm dilution under scaling-law conditions.",
+  "confidence": 0.55,
+  "modality": "hypothesis",
+  "is_speculative": true,
+  "hedge_phrase": "appears to ... under scaling-law conditions"
+}
+
+Input: "Apple was founded on April 1, 1976."
+Output: {
+  "subject": "Apple",
+  "predicate": "was founded on",
+  "object": null,
+  "object_value": "April 1, 1976",
+  "context": "Apple was founded on April 1, 1976.",
+  "confidence": 1.0,
+  "modality": "assertion",
+  "is_speculative": false,
+  "hedge_phrase": null
+}
 
 Output ONLY valid JSON, no preamble, no markdown fences:
 [
@@ -42,7 +83,10 @@ Output ONLY valid JSON, no preamble, no markdown fences:
     "object": "string (entity name) OR null",
     "object_value": "string (literal value/number/date/money) OR null",
     "context": "string (original sentence this came from)",
-    "confidence": float
+    "confidence": float,
+    "modality": "assertion|hypothesis|negation|conditional|comparative",
+    "is_speculative": bool,
+    "hedge_phrase": "string OR null"
   }
 ]"""
 
@@ -232,6 +276,13 @@ class FactExtractor:
     def _validate_facts(self, facts: List[Any]) -> List[Dict[str, Any]]:
         """Validate and clean parsed facts."""
         valid_facts = []
+        _valid_modalities = {
+            "assertion",
+            "hypothesis",
+            "negation",
+            "conditional",
+            "comparative",
+        }
 
         for item in facts:
             if not isinstance(item, dict):
@@ -249,6 +300,16 @@ class FactExtractor:
                 raw_conf = 1.0
             confidence = max(0.0, min(1.0, raw_conf))
 
+            # -- Semantic metadata (v2.0) --
+            raw_modality = str(item.get("modality", "assertion")).lower().strip()
+            modality = (
+                raw_modality if raw_modality in _valid_modalities else "assertion"
+            )
+            is_speculative = bool(item.get("is_speculative", False))
+            hedge_phrase = item.get("hedge_phrase")
+            if hedge_phrase is not None:
+                hedge_phrase = str(hedge_phrase).strip() or None
+
             fact = {
                 "subject": str(subject).strip(),
                 "predicate": str(predicate).strip(),
@@ -256,6 +317,9 @@ class FactExtractor:
                 "object_value": item.get("object_value"),
                 "context": item.get("context", ""),
                 "confidence": confidence,
+                "modality": modality,
+                "is_speculative": is_speculative,
+                "hedge_phrase": hedge_phrase,
             }
 
             if fact["object"] is not None:

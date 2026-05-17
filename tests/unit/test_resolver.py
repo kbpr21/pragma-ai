@@ -133,7 +133,9 @@ class TestEntityResolverFuzzy:
         resolver = EntityResolver(storage, fuzzy_threshold=60)
         result = resolver.resolve("Microsoft Corp")
 
-        assert result.name == "Microsoft Corp"
+        # v2.0: normalization strips corporate suffixes ("Corp"),
+        # so the created entity name is "Microsoft".
+        assert result.name == "Microsoft"
 
 
 class TestEntityResolverCreate:

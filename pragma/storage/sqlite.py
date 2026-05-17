@@ -43,6 +43,38 @@ class SQLiteStore:
             schema = f.read()
         conn.executescript(schema)
         conn.commit()
+        # Run incremental migrations.  Each ALTER TABLE may fail if
+        # the column already exists (SQLite has no IF NOT EXISTS for
+        # ALTER).  We run each statement individually and swallow the
+        # "duplicate column" OperationalError.
+        self._run_migration("002_semantic_metadata.sql")
+        self._run_migration("003_embeddings.sql")
+
+    def _run_migration(self, filename: str) -> None:
+        """Execute a migration file statement-by-statement, tolerating
+        duplicate columns and already-existing indexes."""
+        migration_path = Path(__file__).parent / "migrations" / filename
+        if not migration_path.exists():
+            return
+        conn = self._get_connection()
+        with open(migration_path, encoding="utf-8") as f:
+            sql = f.read()
+        for statement in sql.split(";"):
+            # Strip comment lines and whitespace.
+            lines = [
+                line
+                for line in statement.splitlines()
+                if line.strip() and not line.strip().startswith("--")
+            ]
+            cleaned = " ".join(lines).strip()
+            if not cleaned:
+                continue
+            try:
+                conn.execute(cleaned)
+            except sqlite3.OperationalError:
+                # Column already exists or index already created — safe to ignore.
+                pass
+        conn.commit()
 
     def close(self) -> None:
         if self._conn:
@@ -178,8 +210,10 @@ class SQLiteStore:
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO facts
-            (id, subject_id, predicate, object_id, object_value, context, source_doc, source_page, confidence, ingested_at, valid_from, valid_until, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, subject_id, predicate, object_id, object_value, context,
+             source_doc, source_page, confidence, ingested_at, valid_from,
+             valid_until, is_active, modality, is_speculative, hedge_phrase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fact.id,
                 fact.subject_id,
@@ -194,6 +228,9 @@ class SQLiteStore:
                 fact.valid_from.isoformat() if fact.valid_from else None,
                 fact.valid_until.isoformat() if fact.valid_until else None,
                 1 if fact.is_active else 0,
+                fact.modality,
+                1 if fact.is_speculative else 0,
+                fact.hedge_phrase,
             ),
         )
         conn.commit()

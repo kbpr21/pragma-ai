@@ -115,3 +115,125 @@ class BM25Retriever:
                 entities.append(entity)
 
         return entities
+
+
+class HybridRetriever:
+    """Fuses BM25 keyword retrieval with semantic vector retrieval
+    using Reciprocal Rank Fusion (RRF).
+
+    When the semantic retriever is unavailable (``sentence-transformers``
+    not installed or embeddings disabled), silently degrades to
+    BM25-only retrieval — identical to ``BM25Retriever``.
+
+    RRF score for a document d across rankings R1..Rn:
+        RRF(d) = Σ 1 / (k + rank_i(d))
+    where k is a smoothing constant (default 60).
+    """
+
+    def __init__(
+        self,
+        graph_builder: GraphBuilder,
+        semantic_retriever: Optional["SemanticRetriever"] = None,
+        top_k_per_question: int = 3,
+        max_total_seeds: int = 10,
+        rrf_k: int = 60,
+        semantic_top_k: int = 10,
+    ) -> None:
+        self.bm25 = BM25Retriever(
+            graph_builder,
+            top_k_per_question=top_k_per_question,
+            max_total_seeds=max_total_seeds,
+        )
+        self.semantic = semantic_retriever
+        self.rrf_k = rrf_k
+        self.semantic_top_k = semantic_top_k
+        self.graph_builder = graph_builder
+
+    def find_seed_entities(
+        self,
+        sub_questions: List[str],
+    ) -> List[Entity]:
+        """Find seed entities by fusing BM25 + semantic retrieval."""
+        # BM25 path — always runs.
+        bm25_entities = self.bm25.find_seed_entities(sub_questions)
+
+        # Semantic path — only runs if available.
+        if self.semantic is None or not self.semantic.available:
+            return bm25_entities
+
+        # Get semantic fact hits for each sub-question.
+        semantic_fact_ids: Dict[str, float] = {}
+        for question in sub_questions:
+            if not question or not question.strip():
+                continue
+            hits = self.semantic.query(question, top_k=self.semantic_top_k)
+            for rank, (fact_id, sim) in enumerate(hits):
+                if fact_id not in semantic_fact_ids:
+                    semantic_fact_ids[fact_id] = 0.0
+                # RRF score contribution from this ranking.
+                semantic_fact_ids[fact_id] += 1.0 / (self.rrf_k + rank + 1)
+
+        if not semantic_fact_ids:
+            return bm25_entities
+
+        # Map semantic fact_ids → entity_ids via storage.
+        semantic_entity_scores: Dict[str, float] = {}
+        try:
+            conn = self.graph_builder.storage._get_connection()
+            for fact_id, rrf_score in semantic_fact_ids.items():
+                row = conn.execute(
+                    "SELECT subject_id, object_id FROM facts WHERE id = ?",
+                    (fact_id,),
+                ).fetchone()
+                if row:
+                    for eid in (row["subject_id"], row["object_id"]):
+                        if eid:
+                            semantic_entity_scores[eid] = (
+                                semantic_entity_scores.get(eid, 0.0) + rrf_score
+                            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Hybrid retrieval: fact→entity mapping failed: %s", e)
+            return bm25_entities
+
+        # RRF fusion: combine BM25 entity ranks with semantic entity scores.
+        fused_scores: Dict[str, float] = {}
+
+        # BM25 entities: assign RRF scores by rank position.
+        for rank, entity in enumerate(bm25_entities):
+            fused_scores[entity.id] = 1.0 / (self.rrf_k + rank + 1)
+
+        # Merge semantic scores.
+        for eid, score in semantic_entity_scores.items():
+            fused_scores[eid] = fused_scores.get(eid, 0.0) + score
+
+        # Sort by fused score, retrieve Entity objects.
+        sorted_ids = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
+
+        # Deduplicate: keep order, cap at max_total_seeds.
+        seen = set()
+        result: List[Entity] = []
+        max_seeds = self.bm25.max_total_seeds
+        if len(sub_questions) >= 3:
+            max_seeds = max(max_seeds, len(sub_questions) * 2)
+
+        for eid, _ in sorted_ids:
+            if eid in seen:
+                continue
+            seen.add(eid)
+            # First check if we already have the Entity from BM25.
+            entity = next((e for e in bm25_entities if e.id == eid), None)
+            if entity is None:
+                entity = self.bm25._get_entity(eid)
+            if entity:
+                result.append(entity)
+            if len(result) >= max_seeds:
+                break
+
+        return result
+
+
+# Type import for annotations only.
+try:
+    from pragma.query.semantic import SemanticRetriever  # noqa: F401
+except ImportError:
+    pass

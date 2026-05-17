@@ -3,7 +3,7 @@
 
 # pragma
 
-**Atomic-fact reasoning over a knowledge graph. A RAG alternative that needs no vector database.**
+**Hybrid-reasoning knowledge engine — atomic-fact extraction with semantic nuance, ontology normalization, and agentic multi-hop synthesis. No vector database required.**
 
 [![PyPI version](https://img.shields.io/pypi/v/pragma-ai.svg)](https://pypi.org/project/pragma-ai/)
 [![CI](https://github.com/kbpr21/pragma-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/kbpr21/pragma-ai/actions/workflows/ci.yml)
@@ -12,11 +12,30 @@
 
 [Quickstart](#quickstart) ·
 [Why](#why-pragma) ·
+[What's New in v2.0](#whats-new-in-v20) ·
 [Benchmarks](#benchmarks) ·
 [How it works](#how-it-works) ·
 [Colab demo](docs/quickstart_colab.ipynb)
 
 </div>
+
+---
+
+## What's New in v2.0
+
+> **v2.0.0** is an industrial-grade hardening release that addresses the six
+> critical gaps between pragma and production-grade RAG systems.
+
+| Gap | Solution in v2.0 |
+|---|---|
+| Fact extraction loses semantic nuance | **Semantic metadata**: `modality`, `is_speculative`, `hedge_phrase` on every `AtomicFact` |
+| No fuzzy/conceptual recall | **Hybrid retrieval**: BM25 + sentence-transformer embeddings fused via Reciprocal Rank Fusion |
+| Entity aliases fragment the graph | **Ontology normalization**: synonym expansion, corporate suffix stripping, configurable dictionary |
+| Single-shot synthesis misses contradictions | **Agentic reasoning loop**: evidence assessment → contradiction detection → chain-of-thought → self-verification |
+| No adversarial testing | **40-test benchmark suite** targeting speculative language, ambiguity, negation, multi-hop chains |
+| Speculative claims become hard facts | **Modality classification**: hypothesis, negation, conditional, comparative — with confidence tiers |
+
+All v2.0 features are **additive and opt-in**. Existing KBs auto-migrate on open.
 
 ---
 
@@ -29,12 +48,16 @@ in the prompt, no multi-hop reasoning, no citations, no temporal awareness.
 facts in a single SQLite file. Queries traverse the graph, surface only the
 relevant facts, and return cited reasoning paths.
 
-| | Vector RAG | GraphRAG | LightRAG | **pragma** |
+| | Vector RAG | GraphRAG | LightRAG | **pragma v2.0** |
 |---|---|---|---|---|
 | Vector DB required | Yes | Yes | No | **No** |
-| Multi-hop reasoning | Manual | Yes | Yes | **Yes** |
+| Multi-hop reasoning | Manual | Yes | Yes | **Yes (agentic)** |
 | Reasoning trace | No | Partial | Yes | **Full + fact IDs** |
 | Temporal queries | No | No | No | **Yes (`as_of`)** |
+| Semantic nuance preservation | No | No | No | **Yes (modality + hedge)** |
+| Contradiction detection | No | No | No | **Yes (built-in)** |
+| Hybrid retrieval (BM25 + vector) | No | No | No | **Yes (RRF fusion)** |
+| Ontology normalization | No | No | No | **Yes (synonym + suffix)** |
 | Storage | Vector DB | Vector DB | LMDB | **SQLite** |
 | Infra to operate | Server | Server | Server | **None** |
 | Token efficiency | bounded by chunk count × chunk size | similar | low | **scales with relevant facts, not corpus size** |

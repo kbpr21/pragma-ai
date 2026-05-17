@@ -1,0 +1,95 @@
+{
+  "speculative": [
+    {
+      "text": "AttnRes appears to mitigate PreNorm dilution under scaling-law conditions.",
+      "expected_modality": "hypothesis",
+      "expected_speculative": true,
+      "expected_hedge": "appears to"
+    },
+    {
+      "text": "The compound may inhibit CYP3A4 activity in certain metabolic pathways.",
+      "expected_modality": "hypothesis",
+      "expected_speculative": true,
+      "expected_hedge": "may"
+    },
+    {
+      "text": "It is possible that transformer scaling follows a power-law relationship with compute.",
+      "expected_modality": "hypothesis",
+      "expected_speculative": true,
+      "expected_hedge": "It is possible that"
+    }
+  ],
+  "implicit_causality": [
+    {
+      "text": "After adopting Kubernetes, Acme Corp's deployment frequency improved by 300%.",
+      "expected_subject": "Acme Corp",
+      "expected_predicate_contains": "improved"
+    },
+    {
+      "text": "Since the introduction of the carbon tax, emissions in the region declined steadily.",
+      "expected_subject_contains": "emissions",
+      "expected_predicate_contains": "declined"
+    }
+  ],
+  "contradictions": [
+    {
+      "doc_a": "Apple was founded in 1976 by Steve Jobs and Steve Wozniak.",
+      "doc_b": "Apple Inc. was established in 1975 by Steve Jobs alone.",
+      "expected_conflict": "founding year"
+    },
+    {
+      "doc_a": "GPT-4 has 1.8 trillion parameters.",
+      "doc_b": "GPT-4 contains approximately 200 billion parameters.",
+      "expected_conflict": "parameter count"
+    }
+  ],
+  "ambiguous_entities": [
+    {
+      "text": "Apple released a new product line in September 2023.",
+      "context": "technology",
+      "expected_entity_type": "ORG"
+    },
+    {
+      "text": "Mercury levels in fish have risen due to industrial pollution.",
+      "context": "chemistry",
+      "expected_entity": "Mercury"
+    }
+  ],
+  "multi_hop": [
+    {
+      "docs": [
+        "Alice is the CEO of BetaCorp.",
+        "BetaCorp acquired GammaTech in 2023.",
+        "GammaTech developed the QuantumX processor.",
+        "The QuantumX processor powers the Nebula satellite."
+      ],
+      "query": "Who leads the company that acquired the maker of the Nebula satellite's processor?",
+      "expected_answer_contains": "Alice",
+      "hops_required": 4
+    }
+  ],
+  "negation_sarcasm": [
+    {
+      "text": "This approach is definitely NOT the best solution for scalability.",
+      "expected_modality": "negation",
+      "expected_speculative": false
+    },
+    {
+      "text": "The algorithm does not converge under non-convex conditions.",
+      "expected_modality": "negation",
+      "expected_speculative": false
+    }
+  ],
+  "numerical_precision": [
+    {
+      "text_a": "Apple reached a market capitalization of $3 trillion in 2024.",
+      "text_b": "Apple's market cap hit 3 trillion dollars last year.",
+      "should_resolve_same": true
+    },
+    {
+      "text_a": "The population of Tokyo is 13.96 million.",
+      "text_b": "Tokyo has approximately 14M residents.",
+      "should_resolve_same": true
+    }
+  ]
+}

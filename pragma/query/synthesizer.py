@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1143,3 +1144,368 @@ class AnswerSynthesizer:
                 )
 
         return max(base - penalty, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Agentic Reasoning Loop (v2.0)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ContradictionReport:
+    """Structured report of detected contradictions between facts."""
+
+    fact_a_id: str = ""
+    fact_b_id: str = ""
+    description: str = ""
+    resolution: str = ""
+    resolved_by: str = ""  # "recency", "confidence", "specificity"
+
+
+class AgenticSynthesizer(AnswerSynthesizer):
+    """Multi-step agentic reasoning synthesizer.
+
+    Extends ``AnswerSynthesizer`` with an iterative reasoning loop:
+
+    1. **Evidence Assessment**: Evaluate whether facts are sufficient,
+       contradictory, or have gaps before attempting synthesis.
+    2. **Contradiction Detection**: If facts conflict, identify the
+       conflict and resolve via recency/confidence ranking.
+    3. **Chain-of-Thought Synthesis**: Multi-hop reasoning with
+       explicit bridge-chain construction across evidence.
+    4. **Self-Verification**: Check the generated answer against
+       source facts for grounding and consistency.
+
+    Falls back to single-shot ``AnswerSynthesizer.synthesize()`` if
+    the agentic loop times out, errors, or the evidence is trivially
+    sufficient for a direct answer.
+    """
+
+    def __init__(
+        self,
+        llm: LLMProvider,
+        max_iterations: int = 3,
+    ) -> None:
+        super().__init__(llm)
+        self.max_iterations = max_iterations
+
+    def synthesize(
+        self,
+        query: str,
+        facts: List[Dict[str, Any]],
+        graph_path: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Run the agentic reasoning loop, falling back to single-shot
+        on trivial queries or errors."""
+        # Trivial cases: delegate to base class immediately.
+        if not facts or len(facts) <= 2:
+            return super().synthesize(query, facts, graph_path)
+
+        try:
+            return self._agentic_loop(query, facts, graph_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "AgenticSynthesizer loop failed (%s), falling back to single-shot", e
+            )
+            return super().synthesize(query, facts, graph_path)
+
+    def _agentic_loop(
+        self,
+        query: str,
+        facts: List[Dict[str, Any]],
+        graph_path: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Core multi-step reasoning loop."""
+        # Step 1: Evidence assessment.
+        assessment = self._assess_evidence(query, facts)
+
+        # If evidence is clearly sufficient and non-contradictory,
+        # use single-shot for efficiency.
+        if assessment.get("sufficient") and not assessment.get("contradictions"):
+            return super().synthesize(query, facts, graph_path)
+
+        # Step 2: Handle contradictions.
+        contradictions: List[ContradictionReport] = []
+        resolved_facts = list(facts)
+        if assessment.get("contradictions"):
+            contradictions, resolved_facts = self._resolve_contradictions(
+                query, facts, assessment["contradictions"]
+            )
+
+        # Step 3: Chain-of-thought synthesis with resolved facts.
+        result = self._chain_of_thought_synthesis(query, resolved_facts, graph_path)
+
+        # Step 4: Self-verification loop (up to max_iterations - 1
+        # additional attempts).
+        for iteration in range(self.max_iterations - 1):
+            verification = self._verify_answer(
+                query, result.get("answer", ""), resolved_facts
+            )
+
+            if verification.get("grounded", True):
+                break
+
+            logger.debug(
+                "AgenticSynthesizer: answer failed verification (iter %d), "
+                "re-synthesizing",
+                iteration + 1,
+            )
+            # Re-synthesize with verification feedback.
+            result = self._chain_of_thought_synthesis(
+                query,
+                resolved_facts,
+                graph_path,
+                verification_feedback=verification.get("feedback", ""),
+            )
+
+        # Attach contradiction reports to the result.
+        if contradictions:
+            result["contradictions_detected"] = len(contradictions)
+            result["contradictions"] = [
+                {
+                    "fact_a": c.fact_a_id,
+                    "fact_b": c.fact_b_id,
+                    "description": c.description,
+                    "resolution": c.resolution,
+                }
+                for c in contradictions
+            ]
+
+        return result
+
+    def _assess_evidence(
+        self,
+        query: str,
+        facts: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Assess whether the evidence is sufficient, contradictory,
+        or has gaps.  Uses a lightweight LLM call."""
+        fact_lines = []
+        for i, f in enumerate(facts[:15]):  # Cap to avoid token overflow.
+            subj = f.get("subject", f.get("subject_id", "?"))
+            pred = f.get("predicate", "?")
+            obj = f.get("object_value") or f.get("object", f.get("object_id", ""))
+            conf = f.get("confidence", 1.0)
+            modality = f.get("modality", "assertion")
+            line = (
+                f"F{i+1}: {subj} -- {pred} --> {obj} [conf={conf:.2f}, mod={modality}]"
+            )
+            fact_lines.append(line)
+
+        fact_block = "\n".join(fact_lines)
+
+        prompt = (
+            f"Query: {query}\n\n"
+            f"Available evidence:\n{fact_block}\n\n"
+            "Assess the evidence. Output JSON:\n"
+            '{"sufficient": bool, "contradictions": ["description of each contradiction or empty list"], '
+            '"gaps": ["what information is missing"]}\n'
+            "Output ONLY valid JSON."
+        )
+
+        try:
+            raw = self.llm.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=300,
+            )
+            return json.loads(self._extract_json(raw) or "{}")
+        except Exception:  # noqa: BLE001
+            return {"sufficient": True, "contradictions": [], "gaps": []}
+
+    def _resolve_contradictions(
+        self,
+        query: str,
+        facts: List[Dict[str, Any]],
+        contradiction_descs: List[str],
+    ) -> Tuple[List[ContradictionReport], List[Dict[str, Any]]]:
+        """Resolve contradictions by preferring higher confidence and
+        more recent facts.  Returns reports and the filtered fact list."""
+        reports = []
+        # Sort facts by confidence (desc) then by ingested_at (desc).
+        sorted_facts = sorted(
+            facts,
+            key=lambda f: (
+                f.get("confidence", 0.0),
+                f.get("ingested_at", ""),
+            ),
+            reverse=True,
+        )
+
+        # Simple heuristic: log contradictions and keep the highest-confidence
+        # version. For a production system this would use an LLM judge, but
+        # we optimise for low token overhead here.
+        for desc in contradiction_descs[:5]:
+            report = ContradictionReport(
+                description=str(desc),
+                resolution="Kept highest-confidence fact",
+                resolved_by="confidence",
+            )
+            reports.append(report)
+
+        # Deduplicate by predicate: if two facts share the same subject
+        # and predicate, keep only the highest-confidence one.
+        seen_keys = {}
+        resolved = []
+        for f in sorted_facts:
+            key = (
+                f.get("subject", f.get("subject_id", "")),
+                f.get("predicate", ""),
+            )
+            if key not in seen_keys:
+                seen_keys[key] = True
+                resolved.append(f)
+
+        return reports, resolved if resolved else facts
+
+    def _chain_of_thought_synthesis(
+        self,
+        query: str,
+        facts: List[Dict[str, Any]],
+        graph_path: Optional[List[str]] = None,
+        verification_feedback: str = "",
+    ) -> Dict[str, Any]:
+        """Synthesize with explicit chain-of-thought reasoning."""
+        # Build compact fact representation.
+        fact_lines = self._render_facts_compact(query, facts)
+        fact_block = "\n".join(fact_lines) if fact_lines else "(no relevant facts)"
+
+        feedback_block = ""
+        if verification_feedback:
+            feedback_block = f"\n\nPREVIOUS ANSWER FEEDBACK (fix these issues):\n{verification_feedback}\n"
+
+        prompt = (
+            f"Query: {query}\n\n"
+            f"Evidence:\n{fact_block}\n"
+            f"{feedback_block}\n"
+            "REASONING INSTRUCTIONS:\n"
+            "1. Identify which facts are directly relevant\n"
+            "2. If multi-hop reasoning is needed, explicitly state each step\n"
+            "3. Note any speculative facts (modality=hypothesis) and qualify accordingly\n"
+            "4. If facts are insufficient, say so honestly\n"
+            "5. Cite fact IDs in your answer\n\n"
+            'Output JSON: {"a": "your answer (cite [F1] etc.)", "f": ["F1", ...], '
+            '"reasoning": "step-by-step chain of thought"}\n'
+            "Output ONLY valid JSON."
+        )
+
+        try:
+            raw = self.llm.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=800,
+            )
+            parsed = json.loads(self._extract_json(raw) or '{"a": "", "f": []}')
+        except Exception:  # noqa: BLE001
+            # Fall back to base class.
+            return super().synthesize(query, facts, graph_path)
+
+        answer = parsed.get("a", "")
+        cited = parsed.get("f", [])
+        reasoning = parsed.get("reasoning", "")
+
+        # Compute confidence using the base class method.
+        confidence = self._compute_confidence(query, answer, facts)
+
+        return {
+            "answer": answer,
+            "cited_facts": cited,
+            "confidence": confidence,
+            "reasoning_chain": reasoning,
+            "tokens_used": len(prompt.split()) + len(str(raw).split()),
+        }
+
+    def _verify_answer(
+        self,
+        query: str,
+        answer: str,
+        facts: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Self-verify the answer against source facts."""
+        if not answer:
+            return {"grounded": False, "feedback": "Answer is empty."}
+
+        fact_texts = []
+        for f in facts[:10]:
+            ctx = f.get("context", "")
+            if ctx:
+                fact_texts.append(ctx)
+
+        fact_summary = " | ".join(fact_texts[:10]) if fact_texts else "(no contexts)"
+
+        prompt = (
+            f"Query: {query}\n"
+            f"Answer: {answer}\n"
+            f"Source facts: {fact_summary}\n\n"
+            "Is the answer fully grounded in the source facts? "
+            "Are there any unsupported claims?\n"
+            'Output JSON: {"grounded": bool, "feedback": "issues found or empty string"}\n'
+            "Output ONLY valid JSON."
+        )
+
+        try:
+            raw = self.llm.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=200,
+            )
+            return json.loads(
+                self._extract_json(raw) or '{"grounded": true, "feedback": ""}'
+            )
+        except Exception:  # noqa: BLE001
+            return {"grounded": True, "feedback": ""}
+
+    def _render_facts_compact(
+        self,
+        query: str,
+        facts: List[Dict[str, Any]],
+    ) -> List[str]:
+        """Render facts in compact format with semantic metadata."""
+        lines = []
+        for i, f in enumerate(facts[:20]):
+            subj = f.get("subject", f.get("subject_id", "?"))
+            pred = f.get("predicate", "?")
+            obj = f.get("object_value") or f.get("object", f.get("object_id", ""))
+            conf = f.get("confidence", 1.0)
+            modality = f.get("modality", "assertion")
+            hedge = f.get("hedge_phrase", "")
+
+            line = f"F{i+1}: {subj} -- {pred} --> {obj}"
+            annotations = []
+            if conf < 1.0:
+                annotations.append(f"conf={conf:.2f}")
+            if modality != "assertion":
+                annotations.append(f"mod={modality}")
+            if hedge:
+                annotations.append(f'hedge="{hedge}"')
+            if annotations:
+                line += f" [{', '.join(annotations)}]"
+            lines.append(line)
+        return lines
+
+    @staticmethod
+    def _extract_json(text: str) -> Optional[str]:
+        """Extract the first JSON object from LLM output."""
+        # Try the whole text first.
+        text = text.strip()
+        if text.startswith("{"):
+            return text
+        # Strip markdown fences.
+        text = re.sub(r"```json\s*", "", text)
+        text = re.sub(r"```\s*$", "", text)
+        text = text.strip()
+        if text.startswith("{"):
+            return text
+        # Find first { ... } block.
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        for i, ch in enumerate(text[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        return None

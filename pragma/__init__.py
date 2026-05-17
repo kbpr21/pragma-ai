@@ -27,7 +27,7 @@ from pragma.exceptions import (
     configure_logging,
 )
 
-__version__ = "1.0.7"
+__version__ = "2.0.0"
 
 __all__ = [
     "KnowledgeBase",

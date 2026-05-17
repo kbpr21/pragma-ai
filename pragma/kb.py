@@ -48,6 +48,20 @@ class KnowledgeBase:
         self._resolver = EntityResolver(self._storage, fuzzy_threshold=85)
         self._graph_builder = GraphBuilder(self._storage, kb_dir=kb_dir)
 
+        # Semantic retriever (v2.0) — lazy, only loads model on first use.
+        self._semantic_retriever = None
+        if self.config.embeddings_enabled:
+            try:
+                from pragma.query.semantic import SemanticRetriever
+
+                self._semantic_retriever = SemanticRetriever(
+                    storage=self._storage,
+                    model_name=self.config.embedding_model,
+                    kb_dir=kb_dir,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not init SemanticRetriever: %s", e)
+
     @classmethod
     def from_config(cls, path: str) -> "KnowledgeBase":
         """Create KnowledgeBase from config file."""
@@ -227,10 +241,42 @@ class KnowledgeBase:
                 source_doc=fact_dict.get("_source_doc", ""),
                 source_page=fact_dict.get("_source_page"),
                 confidence=fact_dict.get("confidence", 1.0),
+                modality=fact_dict.get("modality", "assertion"),
+                is_speculative=bool(fact_dict.get("is_speculative", False)),
+                hedge_phrase=fact_dict.get("hedge_phrase"),
             )
             self._storage.save_fact(fact)
             self._graph_builder.add_entity(subject)
             self._graph_builder.add_fact(fact)
+
+        # Embed facts for semantic retrieval (v2.0).
+        if self._semantic_retriever is not None and fact_dicts:
+            embed_dicts = [
+                {
+                    "id": f.get("id", ""),
+                    "context": f.get("_context", ""),
+                    "subject": f.get("subject", ""),
+                    "predicate": f.get("predicate", ""),
+                    "object_value": f.get("object_value"),
+                    "object": f.get("object"),
+                }
+                for f in fact_dicts
+            ]
+            # Use the stored fact IDs instead of dict IDs.
+            try:
+                conn = self._storage._get_connection()
+                rows = conn.execute(
+                    "SELECT id, context FROM facts WHERE source_doc = ? "
+                    "ORDER BY rowid DESC LIMIT ?",
+                    (source_str, len(fact_dicts)),
+                ).fetchall()
+                if rows:
+                    embed_dicts = [
+                        {"id": r["id"], "context": r["context"] or ""} for r in rows
+                    ]
+            except Exception:  # noqa: BLE001
+                pass
+            self._semantic_retriever.embed_facts(embed_dicts)
 
         return IngestResult(
             documents=1,
@@ -416,9 +462,36 @@ class KnowledgeBase:
                 return result
 
         decomposer = QueryDecomposer(self._llm, max_subquestions=top_k)
-        retriever = BM25Retriever(self._graph_builder)
         assembler = FactAssembler(self._graph_builder, min_confidence=min_confidence)
-        synthesizer = AnswerSynthesizer(self._llm)
+
+        # Retriever: hybrid (BM25 + semantic) when embeddings are enabled;
+        # plain BM25 otherwise.  Falls back gracefully.
+        if self._semantic_retriever is not None:
+            from pragma.query.retriever import HybridRetriever
+
+            retriever = HybridRetriever(
+                self._graph_builder,
+                semantic_retriever=self._semantic_retriever,
+                rrf_k=self.config.rrf_k,
+                semantic_top_k=self.config.semantic_top_k,
+            )
+        else:
+            retriever = BM25Retriever(self._graph_builder)
+
+        # Synthesizer: agentic (multi-step reasoning loop with
+        # contradiction detection) when enabled; single-shot otherwise.
+        if self.config.agentic_reasoning:
+            try:
+                from pragma.query.synthesizer import AgenticSynthesizer
+
+                synthesizer = AgenticSynthesizer(
+                    self._llm,
+                    max_iterations=self.config.max_reasoning_iterations,
+                )
+            except ImportError:
+                synthesizer = AnswerSynthesizer(self._llm)
+        else:
+            synthesizer = AnswerSynthesizer(self._llm)
 
         sub_questions = decomposer.decompose(query)
 

@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pragma-ai"
-# 1.0.7 — production release: CI pipeline, documentation overhaul,
-# codebase audit. No breaking API changes from 1.0.x.
-version = "1.0.7"
-description = "Atomic-fact reasoning over a knowledge graph. A RAG alternative that needs no vector database."
+# 2.0.0 — industrial-grade hardening: semantic metadata, hybrid retrieval,
+# ontology normalization, agentic reasoning, adversarial benchmarks.
+version = "2.0.0"
+description = "Hybrid-reasoning knowledge engine: atomic-fact extraction with semantic nuance, ontology normalization, and agentic multi-hop synthesis. No vector database required."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -24,6 +24,10 @@ keywords = [
     "atomic-facts",
     "sqlite",
     "networkx",
+    "hybrid-reasoning",
+    "semantic-search",
+    "ontology",
+    "agentic-reasoning",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",

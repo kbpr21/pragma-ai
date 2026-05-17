@@ -4,6 +4,64 @@ All notable changes to **pragma** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-05-17
+
+Industrial-grade hardening release. Evolves pragma from a proof-of-concept
+into a competitive hybrid-reasoning engine with semantic nuance preservation,
+vector-augmented retrieval, ontology normalization, and agentic multi-hop
+synthesis. **398 tests pass across 4 Python versions.**
+
+### Added
+
+* **Semantic metadata on AtomicFact** — new `modality` (assertion / hypothesis /
+  negation / conditional / comparative), `is_speculative` flag, and `hedge_phrase`
+  field. Preserves hedging language ("appears to", "may", "suggests") instead of
+  collapsing uncertain claims into hard facts.
+* **Latent semantic retrieval** (`pragma.query.semantic.SemanticRetriever`) —
+  sentence-transformer embeddings stored as SQLite BLOBs. Pure NumPy cosine
+  similarity for zero-infrastructure vector search.
+* **Hybrid retriever** (`pragma.query.retriever.HybridRetriever`) — fuses BM25
+  keyword and semantic vector retrieval via Reciprocal Rank Fusion (RRF).
+  Graceful degradation to BM25-only when `sentence-transformers` is not installed.
+* **Ontology normalization** in `EntityResolver` — abbreviation expansion
+  ("ML" → "Machine Learning"), corporate suffix stripping ("Inc.", "Corp."),
+  whitespace normalization, and configurable synonym dictionary
+  (`pragma.graph.synonyms.SynonymDictionary`).
+* **Agentic synthesis** (`pragma.query.synthesizer.AgenticSynthesizer`) —
+  multi-step reasoning loop with evidence assessment, contradiction detection
+  and resolution, chain-of-thought synthesis, and self-verification against
+  source facts. Falls back to single-shot on trivial queries or errors.
+* **`ContradictionReport`** dataclass for structured contradiction output.
+* **Adversarial benchmark suite** (`tests/benchmarks/`) — 40 new tests covering
+  speculative language, implicit causality, contradictions, ambiguous entities,
+  multi-hop chains, negation preservation, numerical precision, synonym expansion,
+  hybrid retriever fallback, and schema backward compatibility.
+* **Schema migrations** — `002_semantic_metadata.sql` (modality/speculative columns)
+  and `003_embeddings.sql` (fact_embeddings table). Auto-migrate on init.
+* **New config fields**: `semantic_top_k`, `rrf_k`, `agentic_reasoning`,
+  `max_reasoning_iterations`, `synonym_dict_path` — all with env var mappings.
+
+### Changed
+
+* **Fact extraction prompt** — completely rewritten for semantic nuance
+  preservation. Now instructs the LLM to detect hedging language, classify
+  epistemic modality, and use refined confidence tiers (1.0 / 0.85 / 0.7 / 0.55).
+* **`EntityResolver.resolve()`** — normalization pipeline runs before fuzzy
+  matching. Synonym expansion + suffix stripping before alias/fuzzy lookup.
+* **`EntityResolver` constructor** — accepts optional `synonym_dict_path`.
+* **`PragmaConfig.to_dict()` / `default()`** — include all new v2.0 fields.
+* **`SQLiteStore._init_db()`** — runs incremental migrations via a robust
+  statement-by-statement runner that tolerates pre-existing columns.
+* **`KnowledgeBase.__init__()`** — initializes `SemanticRetriever` when
+  embeddings are enabled.
+* **`KnowledgeBase.query()`** — uses `HybridRetriever` when embeddings enabled;
+  uses `AgenticSynthesizer` when `agentic_reasoning` is enabled.
+
+### Fixed
+
+* **Migration runner** — fixed comment-stripping logic that could execute empty
+  SQL statements on multi-line migration files.
+
 ## [1.0.7] — 2026-05-15
 
 Production-readiness release. Adds CI, upgrades project maturity

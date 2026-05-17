@@ -5,7 +5,18 @@ from typing import Any, List, Optional
 
 @dataclass
 class AtomicFact:
-    """Represents an atomic fact extracted from a document."""
+    """Represents an atomic fact extracted from a document.
+
+    Semantic metadata fields (v2.0):
+        modality: The epistemic modality of the claim. One of
+            ``assertion``, ``hypothesis``, ``negation``, ``conditional``,
+            ``comparative``.  Defaults to ``assertion``.
+        is_speculative: ``True`` when the source text uses hedging or
+            uncertain language ("appears to", "may", "suggests").
+        hedge_phrase: The original hedging language verbatim, so
+            downstream consumers can reconstruct the author's intent
+            without information loss.
+    """
 
     id: str
     subject_id: str
@@ -20,6 +31,10 @@ class AtomicFact:
     valid_from: Optional[datetime] = None
     valid_until: Optional[datetime] = None
     is_active: bool = True
+    # -- Semantic metadata (v2.0) --
+    modality: str = "assertion"
+    is_speculative: bool = False
+    hedge_phrase: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.ingested_at is None:
@@ -40,6 +55,9 @@ class AtomicFact:
             "valid_from": self.valid_from.isoformat() if self.valid_from else None,
             "valid_until": self.valid_until.isoformat() if self.valid_until else None,
             "is_active": self.is_active,
+            "modality": self.modality,
+            "is_speculative": self.is_speculative,
+            "hedge_phrase": self.hedge_phrase,
         }
 
     @classmethod
@@ -68,6 +86,9 @@ class AtomicFact:
             valid_from=valid_from,
             valid_until=valid_until,
             is_active=data.get("is_active", True),
+            modality=data.get("modality", "assertion"),
+            is_speculative=data.get("is_speculative", False),
+            hedge_phrase=data.get("hedge_phrase"),
         )
 
     def __eq__(self, other: object) -> bool:

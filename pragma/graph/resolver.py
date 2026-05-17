@@ -1,22 +1,40 @@
 import logging
+import re
 import uuid
 from typing import Any, List, Optional
 
 from pragma.models import Entity
+from pragma.graph.synonyms import SynonymDictionary
 
 logger = logging.getLogger(__name__)
 
+# Corporate suffixes to strip during normalization.
+_CORP_SUFFIXES = re.compile(
+    r"\b(inc\.?|corp\.?|ltd\.?|llc|co\.?|plc|gmbh|s\.?a\.?|ag)\s*$",
+    re.IGNORECASE,
+)
+
 
 class EntityResolver:
-    """Resolve entities with fuzzy matching and aliasing."""
+    """Resolve entities with normalization, fuzzy matching, and aliasing.
+
+    Resolution pipeline (v2.0):
+        0. Normalize name (synonym expansion, case, suffix stripping)
+        1. Exact match (case-insensitive)
+        2. Alias lookup
+        3. Fuzzy match (rapidfuzz token_sort_ratio >= threshold)
+        4. Create new entity
+    """
 
     def __init__(
         self,
         storage: Any,
         fuzzy_threshold: int = 85,
+        synonym_dict_path: Optional[str] = None,
     ) -> None:
         self.storage = storage
         self.fuzzy_threshold = fuzzy_threshold
+        self._synonyms = SynonymDictionary(user_dict_path=synonym_dict_path)
         self._init_fuzzy()
 
     def _init_fuzzy(self) -> None:
@@ -28,14 +46,66 @@ class EntityResolver:
             logger.warning("rapidfuzz not installed. Using slow fuzzy matching.")
             self._fuzz = None
 
+    # ------------------------------------------------------------------
+    # Normalization pipeline (v2.0)
+    # ------------------------------------------------------------------
+
+    def normalize(self, name: str) -> str:
+        """Apply the normalization pipeline to an entity name.
+
+        Steps:
+        1. Strip whitespace and collapse multiple spaces
+        2. Expand known abbreviations/synonyms ("ML" → "Machine Learning")
+        3. Strip corporate suffixes ("Inc.", "Corp.", "Ltd.")
+        4. Title-case for consistent storage
+        """
+        if not name:
+            return name
+
+        # Step 1: whitespace normalization.
+        cleaned = " ".join(name.split()).strip()
+
+        # Step 2: synonym expansion (check the full name first, then
+        # individual tokens for abbreviation expansion).
+        expansion = self._synonyms.expand(cleaned)
+        if expansion is not None:
+            if expansion:  # non-empty expansion
+                cleaned = expansion
+            else:
+                # Empty expansion means it's a stripped suffix — keep as is
+                pass
+
+        # Step 3: strip corporate suffixes.
+        cleaned = _CORP_SUFFIXES.sub("", cleaned).strip()
+
+        # Step 4: consistent casing.
+        # - Preserve all-uppercase tokens that look like acronyms (<=5 chars)
+        # - Preserve words with internal capitals (camelCase, PascalCase)
+        # - Title-case only fully lowercase words
+        words = cleaned.split()
+        normalized_words = []
+        for word in words:
+            if word.isupper() and len(word) <= 5:
+                normalized_words.append(word)  # preserve acronyms
+            elif any(c.isupper() for c in word[1:]):
+                normalized_words.append(word)  # preserve internal caps
+            elif word.islower():
+                normalized_words.append(word.capitalize())
+            else:
+                normalized_words.append(word)  # preserve as-is
+        cleaned = " ".join(normalized_words)
+
+        return cleaned.strip() or name.strip()
+
     def resolve(
         self,
         name: str,
         entity_type: Optional[str] = None,
     ) -> Entity:
-        """Resolve an entity by name, with fuzzy matching.
+        """Resolve an entity by name, with normalization and fuzzy matching.
 
         Strategies (in order):
+        0. Normalize name (synonym expansion, case, suffix stripping)
         1. Exact match (case-insensitive)
         2. Alias lookup
         3. Fuzzy match (rapidfuzz token_sort_ratio >= threshold)
@@ -51,7 +121,9 @@ class EntityResolver:
         if not name or not name.strip():
             return self._create_entity("unknown", entity_type)
 
-        name = name.strip()
+        # Step 0: normalize before any matching.
+        original_name = name.strip()
+        name = self.normalize(original_name)
 
         entity = self._exact_match(name)
         if entity:
@@ -63,6 +135,13 @@ class EntityResolver:
                 )
             return entity
 
+        # Also try matching the original (un-normalized) name.
+        if name != original_name:
+            entity = self._exact_match(original_name)
+            if entity:
+                logger.debug(f"Exact match (original): {original_name} -> {entity.id}")
+                return entity
+
         entity = self._alias_lookup(name)
         if entity:
             logger.debug(f"Alias match: {name} -> {entity.id}")
@@ -71,7 +150,8 @@ class EntityResolver:
         entity = self._fuzzy_match(name)
         if entity:
             logger.debug(f"Fuzzy match: {name} -> {entity.id}")
-            new_aliases = entity.aliases + [name]
+            # Add both normalized and original as aliases.
+            new_aliases = list(set(entity.aliases + [name, original_name]))
             self.storage.save_entity(
                 entity.id, entity.name, entity.entity_type, new_aliases
             )

@@ -30,11 +30,20 @@ class PragmaConfig:
 
     embeddings_enabled: bool = False
     embedding_model: str = "all-MiniLM-L6-v2"
+    semantic_top_k: int = 10
+    rrf_k: int = 60
 
     llm_provider: str = "groq"
     llm_model: Optional[str] = None
     llm_temperature: float = 0.0
     max_tokens_per_call: int = 1000
+
+    # Agentic reasoning (v2.0)
+    agentic_reasoning: bool = False
+    max_reasoning_iterations: int = 3
+
+    # Ontology normalization (v2.0)
+    synonym_dict_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Floor of 5 keeps obviously-wrong values (0, negative) from
@@ -64,10 +73,15 @@ class PragmaConfig:
             "PRAGMA_FUZZY_MATCH_THRESHOLD": "fuzzy_match_threshold",
             "PRAGMA_EMBEDDINGS_ENABLED": "embeddings_enabled",
             "PRAGMA_EMBEDDING_MODEL": "embedding_model",
+            "PRAGMA_SEMANTIC_TOP_K": "semantic_top_k",
+            "PRAGMA_RRF_K": "rrf_k",
             "PRAGMA_LLM_PROVIDER": "llm_provider",
             "PRAGMA_LLM_MODEL": "llm_model",
             "PRAGMA_LLM_TEMPERATURE": "llm_temperature",
             "PRAGMA_MAX_TOKENS_PER_CALL": "max_tokens_per_call",
+            "PRAGMA_AGENTIC_REASONING": "agentic_reasoning",
+            "PRAGMA_MAX_REASONING_ITERATIONS": "max_reasoning_iterations",
+            "PRAGMA_SYNONYM_DICT_PATH": "synonym_dict_path",
         }
 
         config: dict[str, Any] = {}
@@ -82,13 +96,18 @@ class PragmaConfig:
                     "query_cache_ttl",
                     "fuzzy_match_threshold",
                     "max_tokens_per_call",
+                    "semantic_top_k",
+                    "rrf_k",
+                    "max_reasoning_iterations",
                 ):
                     value = int(value)
                 elif config_field in ("fact_confidence_threshold", "llm_temperature"):
                     value = float(value)
-                elif config_field == "enable_query_cache":
-                    value = value.lower() in ("true", "1", "yes")
-                elif config_field == "embeddings_enabled":
+                elif config_field in (
+                    "enable_query_cache",
+                    "embeddings_enabled",
+                    "agentic_reasoning",
+                ):
                     value = value.lower() in ("true", "1", "yes")
                 config[config_field] = value
 
@@ -109,10 +128,15 @@ class PragmaConfig:
             fuzzy_match_threshold=85,
             embeddings_enabled=False,
             embedding_model="all-MiniLM-L6-v2",
+            semantic_top_k=10,
+            rrf_k=60,
             llm_provider="inception",
             llm_model=None,
             llm_temperature=0.0,
             max_tokens_per_call=1000,
+            agentic_reasoning=False,
+            max_reasoning_iterations=3,
+            synonym_dict_path=None,
         )
 
     @classmethod
@@ -149,8 +173,13 @@ class PragmaConfig:
             "fuzzy_match_threshold": self.fuzzy_match_threshold,
             "embeddings_enabled": self.embeddings_enabled,
             "embedding_model": self.embedding_model,
+            "semantic_top_k": self.semantic_top_k,
+            "rrf_k": self.rrf_k,
             "llm_provider": self.llm_provider,
             "llm_model": self.llm_model,
             "llm_temperature": self.llm_temperature,
             "max_tokens_per_call": self.max_tokens_per_call,
+            "agentic_reasoning": self.agentic_reasoning,
+            "max_reasoning_iterations": self.max_reasoning_iterations,
+            "synonym_dict_path": self.synonym_dict_path,
         }

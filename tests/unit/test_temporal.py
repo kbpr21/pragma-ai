@@ -41,6 +41,10 @@ class MockFact:
         self.is_active = True
         self.valid_from = valid_from
         self.valid_until = valid_until
+        # Semantic metadata (v2.0)
+        self.modality = "assertion"
+        self.is_speculative = False
+        self.hedge_phrase = None
 
 
 class TestTemporalQueries:
