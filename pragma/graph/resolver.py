@@ -36,6 +36,12 @@ class EntityResolver:
         self.fuzzy_threshold = fuzzy_threshold
         self._synonyms = SynonymDictionary(user_dict_path=synonym_dict_path)
         self._init_fuzzy()
+        self._entities_cache: Optional[List[Entity]] = None
+
+    def _get_cached_entities(self) -> List[Entity]:
+        if self._entities_cache is None:
+            self._entities_cache = self.storage.get_all_entities()
+        return self._entities_cache
 
     def _init_fuzzy(self) -> None:
         try:
@@ -133,6 +139,7 @@ class EntityResolver:
                 self.storage.save_entity(
                     entity.id, entity.name, entity.entity_type, entity.aliases
                 )
+                self._entities_cache = None  # Invalidate cache
             return entity
 
         # Also try matching the original (un-normalized) name.
@@ -155,6 +162,7 @@ class EntityResolver:
             self.storage.save_entity(
                 entity.id, entity.name, entity.entity_type, new_aliases
             )
+            self._entities_cache = None  # Invalidate cache
             return entity
 
         return self._create_entity(name, entity_type)
@@ -168,20 +176,23 @@ class EntityResolver:
         return entity
 
     def _alias_lookup(self, name: str) -> Optional[Entity]:
-        """Strategy 2: Alias lookup (scan aliases JSON array)."""
-        all_entities = self.storage.get_all_entities()
-        name_lower = name.lower()
+        """Strategy 2: Alias lookup (point query on indexed aliases)."""
+        if hasattr(self.storage, "get_entity_id_by_alias") and hasattr(
+            self.storage, "get_entity_by_id"
+        ):
+            entity_id = self.storage.get_entity_id_by_alias(name)
+            if entity_id:
+                return self.storage.get_entity_by_id(entity_id)
+            return None
 
+        # Fallback for storage backends without point query support (e.g. MockStorage)
+        all_entities = self._get_cached_entities()
+        name_lower = name.lower()
         for entity in all_entities:
             if not entity.aliases:
                 continue
-            aliases = [a.lower() for a in entity.aliases]
-            if name_lower in aliases:
+            if any(a.lower() == name_lower for a in entity.aliases):
                 return entity
-            for alias in entity.aliases:
-                if alias.lower() == name_lower:
-                    return entity
-
         return None
 
     def _fuzzy_match(self, name: str) -> Optional[Entity]:
@@ -189,7 +200,7 @@ class EntityResolver:
         if self._fuzz is None:
             return self._slow_fuzzy_match(name)
 
-        all_entities = self.storage.get_all_entities()
+        all_entities = self._get_cached_entities()
         if not all_entities:
             return None
 
@@ -215,7 +226,7 @@ class EntityResolver:
 
     def _slow_fuzzy_match(self, name: str) -> Optional[Entity]:
         """Fallback fuzzy matching without rapidfuzz."""
-        all_entities = self.storage.get_all_entities()
+        all_entities = self._get_cached_entities()
         if not all_entities:
             return None
 
@@ -238,6 +249,7 @@ class EntityResolver:
         """Strategy 4: Create new entity."""
         entity_id = str(uuid.uuid4())
         self.storage.save_entity(entity_id, name, entity_type, [])
+        self._entities_cache = None  # Invalidate cache
         return Entity(
             id=entity_id,
             name=name,
@@ -271,6 +283,7 @@ class EntityResolver:
             entity_a.entity_type or entity_b.entity_type,
             merged_aliases,
         )
+        self._entities_cache = None  # Invalidate cache
 
         return Entity(
             id=entity_a.id,
@@ -281,7 +294,7 @@ class EntityResolver:
 
     def search_entities(self, query: str, limit: int = 10) -> List[Entity]:
         """Search entities by name/alias substring match."""
-        all_entities = self.storage.get_all_entities()
+        all_entities = self._get_cached_entities()
         query_lower = query.lower()
 
         matches = [

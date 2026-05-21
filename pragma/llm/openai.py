@@ -139,6 +139,50 @@ class OpenAIProvider:
             except httpx.HTTPError as e:
                 raise LLMError(f"OpenAI stream failed: {e}")
 
+    def embed(self, texts: List[str], model: Optional[str] = None) -> List[List[float]]:
+        """Compute vector embeddings for a list of texts using the OpenAI embeddings API.
+
+        Args:
+            texts: List of strings to embed.
+            model: Optional model name. Defaults to text-embedding-3-small.
+
+        Returns:
+            List of embedding vectors.
+        """
+        if not texts:
+            return []
+
+        model_name = model or "text-embedding-3-small"
+        payload = {
+            "model": model_name,
+            "input": texts,
+        }
+
+        last_error: Exception = LLMError("Unknown error")
+        for attempt in range(3):
+            try:
+                response = self._get_client().post(
+                    f"{self.BASE_URL}/embeddings",
+                    json=payload,
+                )
+                if response.status_code != 200:
+                    raise LLMError(
+                        f"OpenAI Embeddings API error: {response.status_code} - {response.text}"
+                    )
+                data = response.json()
+                if "data" not in data:
+                    raise LLMError(f"Invalid embeddings response structure: {data}")
+
+                # Sort by index to guarantee order, although OpenAI usually returns sorted
+                embeddings_data = data["data"]
+                embeddings_data.sort(key=lambda x: x.get("index", 0))
+                return [x["embedding"] for x in embeddings_data]
+            except httpx.HTTPError as e:
+                last_error = e
+                if attempt < 2:
+                    time.sleep(2**attempt)
+        raise LLMError(f"OpenAI embeddings call failed after 3 attempts: {last_error}")
+
     def __enter__(self) -> "OpenAIProvider":
         return self
 

@@ -184,3 +184,101 @@ class TestHybridRetrieverInfra:
         results = retriever.find_seed_entities(["test query"])
         assert isinstance(results, list)
         store.close()
+
+
+class TestAPIEmbeddings:
+    """Verify that SemanticRetriever integrates with LLM API embedding providers."""
+
+    class MockOpenAIProvider:
+        def __init__(self):
+            self.embedded_texts = []
+            self.model = "text-embedding-3-small"
+
+        def embed(self, texts, model=None):
+            self.embedded_texts.extend(texts)
+            # Return dummy vectors: 2D vector for each text
+            # E.g., [1.0, 2.0] which is NOT L2-normalized
+            return [[1.0, 2.0] for _ in texts]
+
+    class MockOllamaProvider:
+        def __init__(self):
+            self.embedded_texts = []
+            self.model = "nomic-embed-text"
+
+        def embed(self, texts, model=None):
+            self.embedded_texts.extend(texts)
+            # Return dummy vectors: 2D vector for each text
+            # E.g., [3.0, 4.0] which is NOT L2-normalized
+            return [[3.0, 4.0] for _ in texts]
+
+    def test_semantic_retriever_uses_openai_embed(self, tmp_path):
+        """SemanticRetriever should use OpenAIProvider.embed and L2 normalize vectors."""
+        from pragma.query.semantic import SemanticRetriever
+        from pragma.storage.sqlite import SQLiteStore
+        import numpy as np
+
+        store = SQLiteStore(str(tmp_path))
+        mock_llm = self.MockOpenAIProvider()
+
+        retriever = SemanticRetriever(
+            storage=store,
+            model_name="text-embedding-3-small",
+            llm=mock_llm,
+        )
+
+        assert retriever.available is True
+
+        facts = [
+            {"id": "f1", "context": "Apple was founded by Steve Jobs."},
+            {"id": "f2", "context": "Microsoft was founded by Bill Gates."},
+        ]
+
+        num_embedded = retriever.embed_facts(facts)
+        assert num_embedded == 2
+        assert len(mock_llm.embedded_texts) == 2
+        assert mock_llm.embedded_texts[0] == "Apple was founded by Steve Jobs."
+
+        # Verify that embeddings in retriever's index are L2-normalized
+        vec1 = retriever._index["f1"]
+        # Expected: normalized version of [1.0, 2.0]
+        expected_norm = np.linalg.norm(np.array([1.0, 2.0]))
+        expected_vec = np.array([1.0, 2.0]) / expected_norm
+        assert np.allclose(vec1, expected_vec)
+
+        # Let's perform a query
+        results = retriever.query("Who founded Apple?", top_k=2)
+        assert len(results) == 2
+        # Since all mock embeddings are identical, both will have a similarity of 1.0
+        assert np.allclose(results[0][1], 1.0) or np.allclose(results[0][1], 0.999999)
+
+        store.close()
+
+    def test_semantic_retriever_uses_ollama_embed(self, tmp_path):
+        """SemanticRetriever should use OllamaProvider.embed and L2 normalize vectors."""
+        from pragma.query.semantic import SemanticRetriever
+        from pragma.storage.sqlite import SQLiteStore
+        import numpy as np
+
+        store = SQLiteStore(str(tmp_path))
+        mock_llm = self.MockOllamaProvider()
+
+        retriever = SemanticRetriever(
+            storage=store,
+            model_name="nomic-embed-text",
+            llm=mock_llm,
+        )
+
+        assert retriever.available is True
+
+        facts = [{"id": "f1", "context": "Python is a programming language."}]
+
+        num_embedded = retriever.embed_facts(facts)
+        assert num_embedded == 1
+        assert len(mock_llm.embedded_texts) == 1
+
+        vec1 = retriever._index["f1"]
+        expected_norm = np.linalg.norm(np.array([3.0, 4.0]))
+        expected_vec = np.array([3.0, 4.0]) / expected_norm
+        assert np.allclose(vec1, expected_vec)
+
+        store.close()

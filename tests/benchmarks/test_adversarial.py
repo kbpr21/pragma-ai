@@ -395,4 +395,8 @@ class TestSchemaBackwardCompatibility:
         # Retrieve and verify.
         facts = store.get_facts_by_subject("e1")
         assert len(facts) == 1
+        retrieved_fact = facts[0]
+        assert retrieved_fact.modality == "hypothesis"
+        assert retrieved_fact.is_speculative is True
+        assert retrieved_fact.hedge_phrase == "appears to suggest"
         store.close()

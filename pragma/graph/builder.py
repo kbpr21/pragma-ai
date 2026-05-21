@@ -73,15 +73,32 @@ class GraphBuilder:
     def add_entity(self, entity: Entity) -> None:
         """Add entity node to graph."""
         g = self.graph
+        aliases_str = json.dumps(entity.aliases) if entity.aliases else "[]"
         if not g.has_node(entity.id):
             g.add_node(
                 entity.id,
                 name=entity.name,
                 entity_type=entity.entity_type,
-                aliases=json.dumps(entity.aliases) if entity.aliases else "[]",
+                aliases=aliases_str,
             )
             self._entity_index[entity.id] = entity
             self._invalidate_bm25()
+        else:
+            node_data = g.nodes[entity.id]
+            changed = False
+            if node_data.get("name") != entity.name:
+                node_data["name"] = entity.name
+                changed = True
+            if node_data.get("entity_type") != entity.entity_type:
+                node_data["entity_type"] = entity.entity_type
+                changed = True
+            if node_data.get("aliases") != aliases_str:
+                node_data["aliases"] = aliases_str
+                changed = True
+
+            self._entity_index[entity.id] = entity
+            if changed:
+                self._invalidate_bm25()
 
     def add_fact(self, fact: AtomicFact) -> None:
         """Add fact as edge in NetworkX graph.
@@ -91,29 +108,15 @@ class GraphBuilder:
         """
         g = self.graph
 
-        if fact.subject_id and not g.has_node(fact.subject_id):
+        if fact.subject_id:
             subject_entity = self.storage.get_entity_by_id(fact.subject_id)
             if subject_entity:
-                g.add_node(
-                    fact.subject_id,
-                    name=subject_entity.name,
-                    entity_type=subject_entity.entity_type,
-                    aliases=json.dumps(subject_entity.aliases)
-                    if subject_entity.aliases
-                    else "[]",
-                )
+                self.add_entity(subject_entity)
 
-        if fact.object_id and not g.has_node(fact.object_id):
+        if fact.object_id:
             object_entity = self.storage.get_entity_by_id(fact.object_id)
             if object_entity:
-                g.add_node(
-                    fact.object_id,
-                    name=object_entity.name,
-                    entity_type=object_entity.entity_type,
-                    aliases=json.dumps(object_entity.aliases)
-                    if object_entity.aliases
-                    else "[]",
-                )
+                self.add_entity(object_entity)
 
         edge_key = fact.id
         edge_attrs = {

@@ -3,7 +3,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, AsyncGenerator
+from typing import Any, Dict, List, Optional, Union, AsyncGenerator, Tuple
 
 from pragma.config import PragmaConfig
 from pragma.ingestion.extractor import FactExtractor
@@ -58,6 +58,7 @@ class KnowledgeBase:
                     storage=self._storage,
                     model_name=self.config.embedding_model,
                     kb_dir=kb_dir,
+                    llm=self._llm,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("Could not init SemanticRetriever: %s", e)
@@ -221,6 +222,7 @@ class KnowledgeBase:
         fact_dicts = all_facts
 
         new_entities = set()
+        instantiated_facts = []
         for fact_dict in fact_dicts:
             subject = self._resolver.resolve(fact_dict["subject"], entity_type=None)
             new_entities.add(subject.id)
@@ -248,34 +250,13 @@ class KnowledgeBase:
             self._storage.save_fact(fact)
             self._graph_builder.add_entity(subject)
             self._graph_builder.add_fact(fact)
+            instantiated_facts.append(fact)
 
         # Embed facts for semantic retrieval (v2.0).
-        if self._semantic_retriever is not None and fact_dicts:
+        if self._semantic_retriever is not None and instantiated_facts:
             embed_dicts = [
-                {
-                    "id": f.get("id", ""),
-                    "context": f.get("_context", ""),
-                    "subject": f.get("subject", ""),
-                    "predicate": f.get("predicate", ""),
-                    "object_value": f.get("object_value"),
-                    "object": f.get("object"),
-                }
-                for f in fact_dicts
+                {"id": f.id, "context": f.context or ""} for f in instantiated_facts
             ]
-            # Use the stored fact IDs instead of dict IDs.
-            try:
-                conn = self._storage._get_connection()
-                rows = conn.execute(
-                    "SELECT id, context FROM facts WHERE source_doc = ? "
-                    "ORDER BY rowid DESC LIMIT ?",
-                    (source_str, len(fact_dicts)),
-                ).fetchall()
-                if rows:
-                    embed_dicts = [
-                        {"id": r["id"], "context": r["context"] or ""} for r in rows
-                    ]
-            except Exception:  # noqa: BLE001
-                pass
             self._semantic_retriever.embed_facts(embed_dicts)
 
         return IngestResult(
@@ -508,47 +489,143 @@ class KnowledgeBase:
 
         seed_entities = retriever.find_seed_entities(sub_questions)
 
-        if not seed_entities:
-            result = PragmaResult(
-                answer="Insufficient knowledge in KB for this query",
-                reasoning_path=[],
-                source_facts=[],
-                confidence=0.0,
-                tokens_used=0,
-                latency_ms=(time.time() - start_time) * 1000,
-                subgraph_size=0,
+        # Assemble facts from traversed subgraph if seed entities exist
+        traversed_facts = []
+        subgraph_nodes_count = 0
+        if seed_entities:
+            from pragma.graph.traversal import GraphTraverser
+
+            traverser = GraphTraverser(
+                self._graph_builder,
+                max_subgraph_nodes=self.config.max_subgraph_nodes,
+                default_hop_depth=hop_depth,
             )
-            self._storage.save_query_cache(cache_key, query, result)
-            return result
+            subgraph = traverser.extract_subgraph(seed_entities, hop_depth=hop_depth)
+            subgraph_nodes_count = subgraph.number_of_nodes()
+            if subgraph_nodes_count > 0:
+                traversed_facts = assembler.assemble_facts(
+                    subgraph, as_of=as_of_date, query=query
+                )
 
-        from pragma.graph.traversal import GraphTraverser
+        # Global Semantic Bypass (Gap 2): query the semantic retriever directly
+        semantic_facts = []
+        if self._semantic_retriever is not None:
+            # Query semantic retriever for the main query
+            semantic_fact_scores = {}
+            for fid, score in self._semantic_retriever.query(
+                query, top_k=self.config.semantic_top_k
+            ):
+                semantic_fact_scores[fid] = max(
+                    semantic_fact_scores.get(fid, 0.0), score
+                )
+            # Query semantic retriever for all sub-questions
+            for sq in sub_questions:
+                if sq != query:
+                    for fid, score in self._semantic_retriever.query(
+                        sq, top_k=self.config.semantic_top_k
+                    ):
+                        semantic_fact_scores[fid] = max(
+                            semantic_fact_scores.get(fid, 0.0), score
+                        )
 
-        traverser = GraphTraverser(
-            self._graph_builder,
-            max_subgraph_nodes=self.config.max_subgraph_nodes,
-            default_hop_depth=hop_depth,
-        )
-        subgraph = traverser.extract_subgraph(seed_entities, hop_depth=hop_depth)
+            if semantic_fact_scores:
+                # Hydrate the facts from storage
+                def hydrate_facts_by_ids(fact_ids: List[str]) -> List[AtomicFact]:
+                    if not fact_ids:
+                        return []
+                    try:
+                        if hasattr(self._storage, "_get_connection"):
+                            conn = self._storage._get_connection()
+                            placeholders = ",".join("?" * len(fact_ids))
+                            rows = conn.execute(
+                                f"SELECT * FROM facts WHERE id IN ({placeholders})",
+                                tuple(fact_ids),
+                            ).fetchall()
+                            if hasattr(self._storage, "_row_to_fact"):
+                                return [self._storage._row_to_fact(row) for row in rows]
+                    except Exception as e:
+                        logger.debug("Failed to hydrate facts from connection: %s", e)
+                    # Fallback to get_active_facts
+                    try:
+                        all_active = self._storage.get_active_facts()
+                        id_set = set(fact_ids)
+                        return [f for f in all_active if f.id in id_set]
+                    except Exception as e:
+                        logger.debug("Fallback active facts hydration failed: %s", e)
+                    return []
 
-        if subgraph.number_of_nodes() == 0:
-            result = PragmaResult(
-                answer="Insufficient knowledge in KB for this query",
-                reasoning_path=[],
-                source_facts=[],
-                confidence=0.0,
-                tokens_used=0,
-                latency_ms=(time.time() - start_time) * 1000,
-                subgraph_size=0,
+                hydrated = hydrate_facts_by_ids(list(semantic_fact_scores.keys()))
+                for fact in hydrated:
+                    if not fact.is_active or fact.confidence < min_confidence:
+                        continue
+                    if as_of_date:
+                        if fact.valid_from and fact.valid_from > as_of_date:
+                            continue
+                        if fact.valid_until and fact.valid_until <= as_of_date:
+                            continue
+
+                    # Convert AtomicFact to dictionary
+                    fact_dict = {
+                        "id": fact.id,
+                        "subject_id": fact.subject_id,
+                        "predicate": fact.predicate,
+                        "object_id": fact.object_id,
+                        "object_value": fact.object_value,
+                        "context": fact.context,
+                        "source_doc": fact.source_doc,
+                        "source_page": fact.source_page,
+                        "confidence": fact.confidence,
+                        "ingested_at": fact.ingested_at,
+                        "is_active": fact.is_active,
+                        "modality": fact.modality,
+                        "is_speculative": fact.is_speculative,
+                        "hedge_phrase": fact.hedge_phrase,
+                        "_edge_predicate": fact.predicate,
+                        "_semantic_score": semantic_fact_scores[fact.id],
+                    }
+                    semantic_facts.append(fact_dict)
+
+        # Merge traversed and semantic facts
+        merged_facts_dict = {f["id"]: f for f in traversed_facts}
+        for f in semantic_facts:
+            if f["id"] not in merged_facts_dict:
+                merged_facts_dict[f["id"]] = f
+            else:
+                merged_facts_dict[f["id"]]["_semantic_score"] = f.get(
+                    "_semantic_score", 0.0
+                )
+
+        # Deduplicate, sort and trim the merged list
+        deduplicated = assembler._deduplicate_facts(list(merged_facts_dict.values()))
+
+        if query:
+            keywords = assembler._extract_query_keywords(query)
+        else:
+            keywords = set()
+
+        def score(f: Dict[str, Any]) -> Tuple[float, int, float, str]:
+            overlap = 0
+            if keywords:
+                subj = assembler._get_entity_name(f.get("subject_id")).lower()
+                obj_v = (f.get("object_value") or "").lower()
+                obj = obj_v or assembler._get_entity_name(f.get("object_id")).lower()
+                pred = str(f.get("predicate") or "").lower()
+                blob = f"{subj} {pred} {obj}"
+                overlap = sum(1 for kw in keywords if kw in blob)
+            sem_score = f.get("_semantic_score", 0.0)
+            return (
+                sem_score,
+                overlap,
+                float(f.get("confidence", 0) or 0),
+                str(f.get("ingested_at", "")),
             )
-            self._storage.save_query_cache(cache_key, query, result)
-            return result
 
-        # Pass the query through so the assembler ranks facts by query
-        # overlap before trimming. Critical at multi-document scale where
-        # confidence is uniform; without this the trim drops query-relevant
-        # facts in favour of unrelated facts that happened to be reachable
-        # via hub-node bridges (e.g. shared "enterprise customers" objects).
-        facts = assembler.assemble_facts(subgraph, as_of=as_of_date, query=query)
+        if self._semantic_retriever is not None:
+            sorted_facts = sorted(deduplicated, key=score, reverse=True)
+        else:
+            sorted_facts = assembler._sort_facts(deduplicated, query=query)
+
+        facts = assembler._trim_by_token_budget(sorted_facts)
 
         if not facts:
             result = PragmaResult(
@@ -558,7 +635,7 @@ class KnowledgeBase:
                 confidence=0.0,
                 tokens_used=0,
                 latency_ms=(time.time() - start_time) * 1000,
-                subgraph_size=subgraph.number_of_nodes(),
+                subgraph_size=subgraph_nodes_count,
             )
             self._storage.save_query_cache(cache_key, query, result)
             return result

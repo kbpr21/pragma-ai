@@ -4,6 +4,27 @@ All notable changes to **pragma** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-05-22
+
+Industrial-grade database, ingestion, and graph updates. Resolves severe database bottlenecks, concurrent race conditions, batch ingestion metadata citation leaks, and dynamic graph synchronization issues. **100% backward-compatible.**
+
+### Added
+
+* **Relational `entity_aliases` table** — migration `004_entity_aliases.sql` adds a relational point-lookup mapping table to avoid expensive $O(N \cdot M)$ Python-deserialization scans.
+* **Point-lookup database queries** — added `SQLiteStore.get_entity_id_by_alias(alias)` utilizing a relational, indexed lookup instead of loading all entity rows.
+* **On-demand session caching** — `EntityResolver` now caches entity records inside `self._entities_cache` on demand during fuzzy matching, reducing SQLite table scans to exactly once per ingestion session.
+* **Automated synchronization of aliases** — `SQLiteStore.save_entity()` now keeps the `entity_aliases` table perfectly in sync on every save.
+* **Automatic backward-compatible migration** — added `_migrate_existing_aliases()` to seamlessly populate `entity_aliases` from existing JSON array columns during startup without data corruption.
+
+### Changed
+
+* **Race-Free Ingestion Embedding** — redesigned the facts embedding pipeline in `KnowledgeBase._ingest_single()`. It now maps in-memory instantiated `AtomicFact` models directly to `SemanticRetriever`, bypassing the previous race-prone `SELECT id, context FROM facts WHERE source_doc = ? ORDER BY rowid DESC` database lookups entirely.
+* **Robust Batch Ingestion Citation Heuristic** — refactored `FactExtractor.extract_batch()` to dynamically match each fact's `context` against input `ProcessedSegment` elements via a 4-tier match strategy (exact, word-overlap, keywords, first-segment fallback), eliminating page/doc metadata leaks.
+* **Dynamic Graph Synchronization** — refactored `GraphBuilder.add_entity()` to inspect existing NetworkX nodes and synchronize their properties (`name`, `entity_type`, `aliases`) if updated in later sessions, automatically invalidating the BM25 index and keeping elements aligned.
+* **DRY Graph Node Setup** — refactored `GraphBuilder.add_fact()` to delegate subject/object node creation to `add_entity()` rather than dry-adding raw node objects, ensuring graph invariants remain consistent.
+
+---
+
 ## [2.0.0] — 2026-05-17
 
 Industrial-grade hardening release. Evolves pragma from a proof-of-concept

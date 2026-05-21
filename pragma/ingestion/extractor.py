@@ -151,8 +151,7 @@ class FactExtractor:
 
         if not facts:
             logger.info(
-                f"0 facts parsed from {segment.source} "
-                f"(response {len(response)} chars)"
+                f"0 facts parsed from {segment.source} (response {len(response)} chars)"
             )
 
         for fact in facts:
@@ -384,8 +383,64 @@ class FactExtractor:
         facts = self._filter_by_confidence(facts)
 
         for fact in facts:
-            fact["_source_doc"] = segment_metadata[0].get("source_doc", "")
-            fact["_source_page"] = segment_metadata[0].get("page")
-            fact["_context"] = combined_text[:500]
+            best_segment = None
+            fact_context = fact.get("context", "")
+
+            # 1. Exact or substring match of normalized context
+            if fact_context:
+                norm_context = re.sub(r"\s+", " ", fact_context.lower().strip())
+                for segment in segments:
+                    norm_segment = re.sub(r"\s+", " ", segment.content.lower().strip())
+                    if norm_context in norm_segment:
+                        best_segment = segment
+                        break
+
+                # 2. If not found, look for maximum word overlap
+                if not best_segment:
+                    context_words = set(re.findall(r"\w+", norm_context))
+                    if context_words:
+                        max_overlap = 0
+                        for segment in segments:
+                            norm_segment = re.sub(
+                                r"\s+", " ", segment.content.lower().strip()
+                            )
+                            segment_words = set(re.findall(r"\w+", norm_segment))
+                            overlap = len(context_words.intersection(segment_words))
+                            if overlap > max_overlap:
+                                max_overlap = overlap
+                                best_segment = segment
+
+            # 3. Fallback: match by subject/object keywords
+            if not best_segment:
+                sub = fact.get("subject", "").lower()
+                obj = fact.get("object", "")
+                obj = obj.lower() if obj else ""
+
+                max_score = 0
+                for segment in segments:
+                    score = 0
+                    norm_content = segment.content.lower()
+                    if sub and sub in norm_content:
+                        score += 2
+                    if obj and obj in norm_content:
+                        score += 2
+                    if score > max_score:
+                        max_score = score
+                        best_segment = segment
+
+            # 4. Final fallback to first segment
+            if not best_segment and segments:
+                best_segment = segments[0]
+
+            if best_segment:
+                fact["_source_doc"] = best_segment.metadata.get("source_doc", "")
+                fact["_source_page"] = best_segment.metadata.get("page")
+                fact["_context"] = best_segment.content
+                fact["_content_hash"] = best_segment.content_hash
+            else:
+                fact["_source_doc"] = ""
+                fact["_source_page"] = None
+                fact["_context"] = ""
+                fact["_content_hash"] = ""
 
         return facts

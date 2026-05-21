@@ -77,6 +77,9 @@ class FactAssembler:
                     "confidence": fact.confidence,
                     "ingested_at": fact.ingested_at,
                     "is_active": fact.is_active,
+                    "modality": fact.modality,
+                    "is_speculative": fact.is_speculative,
+                    "hedge_phrase": fact.hedge_phrase,
                     "_edge_predicate": predicate,
                 }
                 all_facts.append(fact_dict)
@@ -149,6 +152,9 @@ class FactAssembler:
                     "confidence": fact.confidence,
                     "ingested_at": fact.ingested_at,
                     "is_active": fact.is_active,
+                    "modality": fact.modality,
+                    "is_speculative": fact.is_speculative,
+                    "hedge_phrase": fact.hedge_phrase,
                     "_edge_predicate": predicate,
                 }
                 result.append(fact_dict)
@@ -319,10 +325,7 @@ class FactAssembler:
 
         Mirrors :meth:`pragma.query.synthesizer.AnswerSynthesizer._format_fact`
         so the assembler's token-budget estimate matches what's actually sent
-        to the LLM. The format is intentionally simple
-        (``F<idx>: <subject> -- <predicate> --> <object>``) and excludes the
-        confidence value -- that's metadata pragma uses internally and the
-        LLM does not need to see it.
+        to the LLM.
         """
         fid = f"F{index + 1}"
         subject = self._get_entity_name(fact.get("subject_id"))
@@ -330,7 +333,34 @@ class FactAssembler:
         object_id = fact.get("object_id")
         object_value = fact.get("object_value")
         object_val = self._get_entity_name(object_id) if object_id else object_value
-        return f"{fid}: {subject} -- {predicate} --> {object_val}"
+
+        if object_val in (None, "", "?", "unknown") or not str(object_val).strip():
+            base = f"{subject} -- {predicate}"
+        else:
+            base = f"{subject} -- {predicate} --> {object_val}"
+
+        context = str(fact.get("context") or "").strip()
+        source_str = ""
+        if context:
+            source_str = f' [Source: "{context}"]'
+
+        modality = fact.get("modality", "assertion")
+        is_speculative = bool(fact.get("is_speculative", False))
+        hedge = fact.get("hedge_phrase")
+
+        tags = []
+        if modality and modality != "assertion":
+            tags.append(f"modality: {modality}")
+        elif is_speculative:
+            tags.append("modality: speculative")
+        if hedge:
+            tags.append(f"hedge: '{hedge}'")
+
+        tag_str = ""
+        if tags:
+            tag_str = f" [{', '.join(tags)}]"
+
+        return f"{fid}: {base}{source_str}{tag_str}"
 
     def _get_entity_name(self, entity_id: Optional[str]) -> str:
         """Get entity name by ID; returns the id (or ``unknown``) on failure."""

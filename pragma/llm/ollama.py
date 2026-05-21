@@ -121,6 +121,65 @@ class OllamaProvider:
             except httpx.HTTPError as e:
                 raise LLMError(f"Ollama stream failed: {e}")
 
+    def embed(self, texts: List[str], model: Optional[str] = None) -> List[List[float]]:
+        """Compute vector embeddings for a list of texts using the Ollama API.
+
+        Tries modern `/api/embed` first (supports batching). Fallback to `/api/embeddings`
+        one-by-one if that fails.
+        """
+        if not texts:
+            return []
+
+        if not self._check_ollama_running():
+            raise LLMError(
+                "Ollama is not running. Start Ollama to use local embeddings."
+            )
+
+        model_name = model or self.model
+
+        # Try modern /api/embed first
+        payload = {
+            "model": model_name,
+            "input": texts,
+        }
+        try:
+            response = self._get_client().post(
+                f"{self.BASE_URL}/api/embed",
+                json=payload,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if "embeddings" in data:
+                    return data["embeddings"]
+        except Exception:
+            # Silently catch and try fallback
+            pass
+
+        # Fallback to /api/embeddings one by one
+        embeddings = []
+        for text in texts:
+            payload = {
+                "model": model_name,
+                "prompt": text,
+            }
+            try:
+                response = self._get_client().post(
+                    f"{self.BASE_URL}/api/embeddings",
+                    json=payload,
+                )
+                if response.status_code != 200:
+                    raise LLMError(
+                        f"Ollama embedding API error: {response.status_code} - {response.text}"
+                    )
+                data = response.json()
+                if "embedding" in data:
+                    embeddings.append(data["embedding"])
+                else:
+                    raise LLMError(f"Invalid embedding response: {data}")
+            except Exception as e:
+                raise LLMError(f"Ollama fallback embeddings call failed: {e}")
+        return embeddings
+
     def __enter__(self) -> "OllamaProvider":
         return self
 
@@ -152,8 +211,7 @@ class OllamaProvider:
             resp = httpx.get(f"{url}/api/tags", timeout=timeout)
         except httpx.HTTPError as e:
             raise LLMError(
-                f"Cannot reach Ollama at {url}. Is it running? "
-                f"Try: ollama serve  ({e})"
+                f"Cannot reach Ollama at {url}. Is it running? Try: ollama serve  ({e})"
             )
         if resp.status_code != 200:
             raise LLMError(

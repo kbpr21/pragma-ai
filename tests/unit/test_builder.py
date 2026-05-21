@@ -366,3 +366,58 @@ class TestGraphBuilderRemoveFact:
 
         builder.remove_fact("f1")
         assert builder.graph.number_of_edges() == 0
+
+
+class TestGraphBuilderEntityUpdate:
+    """Tests for entity dynamic updates and BM25 invalidation in GraphBuilder."""
+
+    def test_add_entity_updates_existing_attributes(self, tmp_path):
+        storage = MockStorage()
+        builder = GraphBuilder(storage, kb_dir=str(tmp_path))
+
+        entity_v1 = Entity("e1", "Apple", "ORG", ["Apple Inc"], None)
+        builder.add_entity(entity_v1)
+        assert builder.graph.nodes["e1"]["name"] == "Apple"
+        assert builder.graph.nodes["e1"]["entity_type"] == "ORG"
+
+        # Now update properties
+        entity_v2 = Entity(
+            "e1", "Apple Redux", "COMPANY", ["Apple Inc", "Apple Corp"], None
+        )
+        builder.add_entity(entity_v2)
+
+        # Check that attributes are updated
+        assert builder.graph.nodes["e1"]["name"] == "Apple Redux"
+        assert builder.graph.nodes["e1"]["entity_type"] == "COMPANY"
+        import json
+
+        assert json.loads(builder.graph.nodes["e1"]["aliases"]) == [
+            "Apple Inc",
+            "Apple Corp",
+        ]
+
+    def test_add_fact_delegates_to_add_entity(self, tmp_path):
+        storage = MockStorage()
+        storage.save_entity("e1", "Apple Dynamic", "ORG", ["Apple Inc"])
+        storage.save_entity("e2", "Google Dynamic", "ORG", ["Google LLC"])
+
+        builder = GraphBuilder(storage, kb_dir=str(tmp_path))
+
+        # Add initial version to graph
+        builder.add_entity(Entity("e1", "Apple Old", "ORG", [], None))
+
+        # When we add a fact, subject entity details from storage should synchronize and overwrite
+        fact = AtomicFact(
+            id="f1",
+            subject_id="e1",
+            predicate="competes with",
+            object_id="e2",
+            confidence=1.0,
+        )
+        builder.add_fact(fact)
+
+        assert builder.graph.nodes["e1"]["name"] == "Apple Dynamic"
+        import json
+
+        assert json.loads(builder.graph.nodes["e1"]["aliases"]) == ["Apple Inc"]
+        assert builder.graph.nodes["e2"]["name"] == "Google Dynamic"

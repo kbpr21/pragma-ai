@@ -4,9 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pragma-ai"
-# 2.0.0 — industrial-grade hardening: semantic metadata, hybrid retrieval,
-# ontology normalization, agentic reasoning, adversarial benchmarks.
-version = "2.0.0"
+# 2.1.0 — industrial-grade hybrid semantic/graph bypass & modality reasoning upgrades
+version = "2.1.0"
 description = "Hybrid-reasoning knowledge engine: atomic-fact extraction with semantic nuance, ontology normalization, and agentic multi-hop synthesis. No vector database required."
 readme = "README.md"
 license = {text = "MIT"}

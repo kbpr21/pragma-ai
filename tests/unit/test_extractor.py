@@ -271,3 +271,68 @@ class TestFactExtractorMaxFacts:
             result = extractor.extract(segments)
 
         assert len(result) == 2
+
+
+class TestFactExtractorBatchCitationMatching:
+    """Test citation matching correctness in extract_batch."""
+
+    def test_batch_extract_correct_metadata_mapping(self):
+        # We simulate batch extraction from 3 segments with distinct page numbers
+        response_text = """[
+            {"subject": "Apple", "predicate": "released", "object": "iPhone", "context": "Apple released the iPhone in 2007", "confidence": 1.0},
+            {"subject": "Google", "predicate": "introduced", "object": "Android", "context": "Google introduced Android in 2008", "confidence": 1.0},
+            {"subject": "Microsoft", "predicate": "launched", "object": "Windows", "context": "Microsoft launched Windows in 1985", "confidence": 1.0}
+        ]"""
+
+        llm = MockLLMProvider(response=response_text)
+        extractor = FactExtractor(llm)
+
+        seg1 = ProcessedSegment(
+            content="Apple released the iPhone in 2007.",
+            source="doc1.txt",
+            doc_type="txt",
+            chunk_index=0,
+            content_hash="hash1",
+            metadata={"source_doc": "doc1.txt", "page": 1},
+        )
+        seg2 = ProcessedSegment(
+            content="Google introduced Android in 2008.",
+            source="doc2.txt",
+            doc_type="txt",
+            chunk_index=1,
+            content_hash="hash2",
+            metadata={"source_doc": "doc2.txt", "page": 4},
+        )
+        seg3 = ProcessedSegment(
+            content="Microsoft launched Windows in 1985.",
+            source="doc3.txt",
+            doc_type="txt",
+            chunk_index=2,
+            content_hash="hash3",
+            metadata={"source_doc": "doc3.txt", "page": 9},
+        )
+
+        result = extractor.extract_batch([seg1, seg2, seg3], max_tokens=4000)
+
+        assert len(result) == 3
+
+        # Verify Apple maps to seg1 / page 1
+        apple_fact = next(r for r in result if r["subject"] == "Apple")
+        assert apple_fact["_source_doc"] == "doc1.txt"
+        assert apple_fact["_source_page"] == 1
+        assert apple_fact["_content_hash"] == "hash1"
+        assert apple_fact["_context"] == "Apple released the iPhone in 2007."
+
+        # Verify Google maps to seg2 / page 4
+        google_fact = next(r for r in result if r["subject"] == "Google")
+        assert google_fact["_source_doc"] == "doc2.txt"
+        assert google_fact["_source_page"] == 4
+        assert google_fact["_content_hash"] == "hash2"
+        assert google_fact["_context"] == "Google introduced Android in 2008."
+
+        # Verify Microsoft maps to seg3 / page 9
+        ms_fact = next(r for r in result if r["subject"] == "Microsoft")
+        assert ms_fact["_source_doc"] == "doc3.txt"
+        assert ms_fact["_source_page"] == 9
+        assert ms_fact["_content_hash"] == "hash3"
+        assert ms_fact["_context"] == "Microsoft launched Windows in 1985."

@@ -427,9 +427,8 @@ class AnswerSynthesizer:
     ) -> str:
         """Render one fact compactly, using entity names not UUIDs.
 
-        Falls back to including a truncated ``context`` sentence when the
-        object slot is empty -- this guards against extractor failures
-        where the value was absorbed into the predicate.
+        Appends the verbatim `context` sentence and speculative modality tags
+        to preserve 100% raw sentence semantics and modal qualifiers.
         """
         if isinstance(fact, str):
             return f"F{idx}: {fact}"
@@ -439,21 +438,41 @@ class AnswerSynthesizer:
         obj_value = fact.get("object_value")
         obj = obj_value if obj_value else self._resolve(fact.get("object_id"), names)
         pred = fact.get("predicate", "?")
+        context = str(fact.get("context") or "").strip()
 
-        # Safety net: if the object slot is still empty / "?", emit the
-        # source sentence so the LLM has a fallback to read the actual
-        # value from. This catches the "predicate absorbed the value"
-        # extractor failure mode in v1.0.1 fact data.
         if obj in (None, "", "?", "unknown") or not str(obj).strip():
-            context = str(fact.get("context") or "").strip()
+            base = f"{subj} -- {pred}"
             if context:
                 if len(context) > self._CONTEXT_SAFETY_NET_CHARS:
                     context = (
                         context[: self._CONTEXT_SAFETY_NET_CHARS - 1].rstrip() + "..."
                     )
-                return f"F{idx}: {subj} -- {pred} (context: {context})"
+                source_str = f" (context: {context})"
+            else:
+                source_str = ""
+        else:
+            base = f"{subj} -- {pred} --> {obj}"
+            source_str = ""
+            if context:
+                source_str = f' [Source: "{context}"]'
 
-        return f"F{idx}: {subj} -- {pred} --> {obj}"
+        modality = fact.get("modality", "assertion")
+        is_speculative = bool(fact.get("is_speculative", False))
+        hedge = fact.get("hedge_phrase")
+
+        tags = []
+        if modality and modality != "assertion":
+            tags.append(f"modality: {modality}")
+        elif is_speculative:
+            tags.append("modality: speculative")
+        if hedge:
+            tags.append(f"hedge: '{hedge}'")
+
+        tag_str = ""
+        if tags:
+            tag_str = f" [{', '.join(tags)}]"
+
+        return f"F{idx}: {base}{source_str}{tag_str}"
 
     # ------------------------------------------------------------------
     # Query-keyword pre-filter
@@ -521,6 +540,11 @@ class AnswerSynthesizer:
         candidates: List[Dict[str, Any]] = []
         for f in facts:
             if float(f.get("confidence", 0)) < 0.85:
+                continue
+            if bool(f.get("is_speculative", False)):
+                continue
+            modality = f.get("modality", "assertion")
+            if modality and modality != "assertion":
                 continue
             subj = self._resolve(f.get("subject_id"), entity_names).lower()
             pred = str(f.get("predicate") or "").lower()
@@ -1287,9 +1311,7 @@ class AgenticSynthesizer(AnswerSynthesizer):
             obj = f.get("object_value") or f.get("object", f.get("object_id", ""))
             conf = f.get("confidence", 1.0)
             modality = f.get("modality", "assertion")
-            line = (
-                f"F{i+1}: {subj} -- {pred} --> {obj} [conf={conf:.2f}, mod={modality}]"
-            )
+            line = f"F{i + 1}: {subj} -- {pred} --> {obj} [conf={conf:.2f}, mod={modality}]"
             fact_lines.append(line)
 
         fact_block = "\n".join(fact_lines)
@@ -1470,7 +1492,7 @@ class AgenticSynthesizer(AnswerSynthesizer):
             modality = f.get("modality", "assertion")
             hedge = f.get("hedge_phrase", "")
 
-            line = f"F{i+1}: {subj} -- {pred} --> {obj}"
+            line = f"F{i + 1}: {subj} -- {pred} --> {obj}"
             annotations = []
             if conf < 1.0:
                 annotations.append(f"conf={conf:.2f}")

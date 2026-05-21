@@ -49,6 +49,8 @@ class SQLiteStore:
         # "duplicate column" OperationalError.
         self._run_migration("002_semantic_metadata.sql")
         self._run_migration("003_embeddings.sql")
+        self._run_migration("004_entity_aliases.sql")
+        self._migrate_existing_aliases()
 
     def _run_migration(self, filename: str) -> None:
         """Execute a migration file statement-by-statement, tolerating
@@ -75,6 +77,52 @@ class SQLiteStore:
                 # Column already exists or index already created — safe to ignore.
                 pass
         conn.commit()
+
+    def _migrate_existing_aliases(self) -> None:
+        """One-time migration to populate entity_aliases table from the entities JSON aliases column."""
+        conn = self._get_connection()
+        cursor = conn.execute("SELECT COUNT(*) FROM entity_aliases")
+        alias_count = cursor.fetchone()[0]
+        if alias_count > 0:
+            return
+
+        cursor = conn.execute(
+            "SELECT id, aliases FROM entities WHERE aliases IS NOT NULL"
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            return
+
+        to_insert = []
+        for row in rows:
+            entity_id = row["id"]
+            aliases_str = row["aliases"]
+            if not aliases_str:
+                continue
+            try:
+                aliases = json.loads(aliases_str)
+                if isinstance(aliases, list):
+                    for alias in aliases:
+                        if alias:
+                            to_insert.append((alias.lower().strip(), entity_id))
+            except Exception:
+                continue
+
+        if to_insert:
+            conn.executemany(
+                "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
+                to_insert,
+            )
+            conn.commit()
+
+    def get_entity_id_by_alias(self, alias: str) -> Optional[str]:
+        """Look up entity ID by alias from the indexed entity_aliases table."""
+        conn = self._get_connection()
+        row = conn.execute(
+            "SELECT entity_id FROM entity_aliases WHERE alias = ? LIMIT 1",
+            (alias.lower().strip(),),
+        ).fetchone()
+        return row["entity_id"] if row else None
 
     def close(self) -> None:
         if self._conn:
@@ -181,6 +229,20 @@ class SQLiteStore:
                     now,
                 ),
             )
+
+        # Synchronize aliases to entity_aliases table
+        conn.execute("DELETE FROM entity_aliases WHERE entity_id = ?", (entity_id,))
+        if aliases:
+            to_insert = []
+            for alias in aliases:
+                if alias:
+                    to_insert.append((alias.lower().strip(), entity_id))
+            if to_insert:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO entity_aliases (alias, entity_id) VALUES (?, ?)",
+                    to_insert,
+                )
+
         conn.commit()
         return entity_id
 
@@ -355,6 +417,12 @@ class SQLiteStore:
         )
 
     def _row_to_fact(self, row: sqlite3.Row) -> AtomicFact:
+        keys = row.keys()
+        modality = row["modality"] if "modality" in keys else "assertion"
+        is_speculative = (
+            bool(row["is_speculative"]) if "is_speculative" in keys else False
+        )
+        hedge_phrase = row["hedge_phrase"] if "hedge_phrase" in keys else None
         return AtomicFact(
             id=row["id"],
             subject_id=row["subject_id"],
@@ -375,6 +443,9 @@ class SQLiteStore:
             if row["valid_until"]
             else None,
             is_active=bool(row["is_active"]),
+            modality=modality,
+            is_speculative=is_speculative,
+            hedge_phrase=hedge_phrase,
         )
 
     def _row_to_result(self, row: sqlite3.Row) -> PragmaResult:

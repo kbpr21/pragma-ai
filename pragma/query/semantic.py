@@ -33,10 +33,12 @@ class SemanticRetriever:
         storage: Any,
         model_name: str = "all-MiniLM-L6-v2",
         kb_dir: Optional[str] = None,
+        llm: Optional[Any] = None,
     ) -> None:
         self.storage = storage
         self.model_name = model_name
         self._kb_dir = Path(kb_dir) if kb_dir else None
+        self._llm = llm
         self._model: Any = None
         self._available: Optional[bool] = None
         # In-memory cache: {fact_id: embedding_vector}
@@ -48,10 +50,19 @@ class SemanticRetriever:
     # ------------------------------------------------------------------
 
     def _ensure_model(self) -> bool:
-        """Load the sentence-transformer model lazily.  Returns True if
-        the model is usable."""
+        """Load the embedding model or verify the LLM provider's embedding method.
+
+        Returns True if a model or LLM provider's embedding capability is usable.
+        """
         if self._available is not None:
             return self._available
+
+        # Check if the LLM provider has an embed method
+        if self._llm is not None and hasattr(self._llm, "embed"):
+            self._available = True
+            logger.info("SemanticRetriever: using API-based embedding via LLM provider")
+            return True
+
         try:
             from sentence_transformers import SentenceTransformer
 
@@ -61,7 +72,7 @@ class SemanticRetriever:
         except ImportError:
             self._available = False
             logger.warning(
-                "sentence-transformers not installed; "
+                "sentence-transformers not installed and LLM provider lacks embed capability; "
                 "semantic retrieval disabled. Install with: "
                 "pip install 'pragma-ai[embeddings]'"
             )
@@ -141,12 +152,24 @@ class SemanticRetriever:
             texts.append(text or "unknown")
 
         try:
-            embeddings = self._model.encode(
-                texts,
-                show_progress_bar=False,
-                batch_size=64,
-                normalize_embeddings=True,
-            )
+            if self._llm is not None and hasattr(self._llm, "embed"):
+                raw_embeddings = self._llm.embed(texts, model=self.model_name)
+                # Convert to numpy arrays and L2-normalize
+                embeddings = []
+                for e in raw_embeddings:
+                    vec = np.array(e, dtype=np.float32)
+                    norm = np.linalg.norm(vec)
+                    if norm > 0:
+                        vec = vec / norm
+                    embeddings.append(vec)
+            else:
+                raw_embeddings = self._model.encode(
+                    texts,
+                    show_progress_bar=False,
+                    batch_size=64,
+                    normalize_embeddings=True,
+                )
+                embeddings = [e for e in raw_embeddings]
         except Exception as e:  # noqa: BLE001
             logger.warning("Embedding computation failed: %s", e)
             return 0
@@ -192,11 +215,18 @@ class SemanticRetriever:
             return []
 
         try:
-            query_vec = self._model.encode(
-                [text],
-                show_progress_bar=False,
-                normalize_embeddings=True,
-            )[0].astype(np.float32)
+            if self._llm is not None and hasattr(self._llm, "embed"):
+                raw_query_vec = self._llm.embed([text], model=self.model_name)[0]
+                query_vec = np.array(raw_query_vec, dtype=np.float32)
+                norm = np.linalg.norm(query_vec)
+                if norm > 0:
+                    query_vec = query_vec / norm
+            else:
+                query_vec = self._model.encode(
+                    [text],
+                    show_progress_bar=False,
+                    normalize_embeddings=True,
+                )[0].astype(np.float32)
         except Exception as e:  # noqa: BLE001
             logger.warning("Query embedding failed: %s", e)
             return []

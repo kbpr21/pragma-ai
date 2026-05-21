@@ -377,6 +377,9 @@ def test_query_populates_source_facts(tmp_path: Path) -> None:
         traverser_inst.get_reasoning_paths.return_value = ["A [is] B"]
 
         Ass.return_value.assemble_facts.return_value = facts
+        Ass.return_value._deduplicate_facts.return_value = facts
+        Ass.return_value._sort_facts.return_value = facts
+        Ass.return_value._trim_by_token_budget.return_value = facts
 
         synth_out = type(
             "S",
